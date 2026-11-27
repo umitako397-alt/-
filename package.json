@@ -1,0 +1,13 @@
+{
+  "name": "ai-gomi-navi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "全国47都道府県・自治体対応 AIごみ分別ナビ (Cloudflare Workers + Gemini API + Google Maps API)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  }
+}

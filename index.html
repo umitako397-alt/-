@@ -1,0 +1,2956 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIごみ分別ナビ - 全国47都道府県・自治体対応＆マップルート案内</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Noto Sans JP & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <!-- Font Awesome for Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Google Maps JavaScript API（Cloudflare Workers /api/config 経由で安全に動的ロード） -->
+  <script>
+    window.googleMapsReady = false;
+    window.gm_authFailure = function() {
+      window.googleMapsAuthFailed = true;
+      if (typeof handleGoogleMapsFallback === "function") {
+        handleGoogleMapsFallback();
+      }
+    };
+
+    async function loadGoogleMapsScript() {
+      try {
+        const res = await fetch('/api/config');
+        if (!res.ok) throw new Error('Config fetch failed');
+        const config = await res.json();
+        const apiKey = config.googleMapsApiKey;
+        if (!apiKey) {
+          window.googleMapsAuthFailed = true;
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&language=ja&region=JP`;
+        script.async = true;
+        script.defer = true;
+        script.onload = () => {
+          window.googleMapsReady = true;
+          if (!document.getElementById('view-map')?.classList.contains('hidden')) {
+            initOrUpdateMap();
+          }
+        };
+        script.onerror = () => {
+          window.googleMapsAuthFailed = true;
+          if (typeof handleGoogleMapsFallback === "function") {
+            handleGoogleMapsFallback();
+          }
+        };
+        document.head.appendChild(script);
+      } catch (e) {
+        window.googleMapsAuthFailed = true;
+      }
+    }
+    loadGoogleMapsScript();
+  </script>
+  <!-- Leaflet CSS & JS (フォールバック用) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <!-- TensorFlow.js & MobileNet (API制限時のオフラインAI画像認識フォールバック用) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
+  <style>
+    body {
+      font-family: 'Noto Sans JP', 'Inter', sans-serif;
+      background-color: #f3f6f8;
+      color: #1e293b;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .camera-scan-line {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 3px;
+      background: linear-gradient(90deg, transparent, #10b981, transparent);
+      box-shadow: 0 0 12px #10b981;
+      animation: scan 2.5s infinite linear;
+    }
+    @keyframes scan {
+      0% { top: 5%; opacity: 0.2; }
+      50% { top: 90%; opacity: 1; }
+      100% { top: 5%; opacity: 0.2; }
+    }
+    /* Leaflet カスタムスタイル */
+    #yokkaichi-map {
+      z-index: 10;
+    }
+    .custom-div-icon {
+      background: transparent;
+      border: none;
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #f1f5f9;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 9999px;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- ヘッダー -->
+  <header class="bg-gradient-to-r from-emerald-700 to-teal-700 text-white shadow-md sticky top-0 z-40">
+    <div class="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center space-x-2.5">
+        <div class="bg-white/20 p-2 rounded-xl backdrop-blur-sm">
+          <i class="fa-solid fa-recycle text-xl text-emerald-100"></i>
+        </div>
+        <div>
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <span id="header-muni-badge" class="text-[11px] font-bold tracking-wider bg-emerald-900/60 px-2 py-0.5 rounded-full text-emerald-100">三重県四日市市 公式分別表準拠</span>
+            <button onclick="openMunicipalityModal()" class="text-[11px] font-bold bg-amber-400 hover:bg-amber-300 text-slate-900 px-2 py-0.5 rounded-full transition flex items-center gap-1 shadow-sm">
+              <i class="fa-solid fa-location-dot"></i>
+              <span id="header-change-muni-text">全国・自治体選択</span>
+            </button>
+          </div>
+          <h1 id="header-app-title" class="text-lg sm:text-xl font-black tracking-tight leading-tight mt-0.5">四日市 AIごみ分別ナビ</h1>
+        </div>
+      </div>
+      <button onclick="openRuleModal()" class="text-xs sm:text-sm bg-white/15 hover:bg-white/25 active:bg-white/30 px-3 py-2 rounded-xl font-bold transition flex items-center gap-1.5 shrink-0">
+        <i class="fa-solid fa-circle-info"></i>
+        <span class="hidden sm:inline">共通ルール</span>
+      </button>
+    </div>
+
+    <!-- タブナビゲーション -->
+    <nav class="max-w-3xl mx-auto px-2 sm:px-4 flex border-t border-white/15 text-xs sm:text-sm font-bold">
+      <button id="tab-camera" onclick="switchTab('camera')" class="flex-1 py-2.5 text-center border-b-4 border-white text-white transition flex items-center justify-center gap-1 sm:gap-1.5">
+        <i class="fa-solid fa-camera"></i>
+        <span>カメラ・写真判定</span>
+      </button>
+      <button id="tab-search" onclick="switchTab('search')" class="flex-1 py-2.5 text-center border-b-4 border-transparent text-emerald-100 hover:text-white transition flex items-center justify-center gap-1 sm:gap-1.5">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <span>品目一覧検索</span>
+      </button>
+      <button id="tab-map" onclick="switchTab('map')" class="flex-1 py-2.5 text-center border-b-4 border-transparent text-emerald-100 hover:text-white transition flex items-center justify-center gap-1 sm:gap-1.5">
+        <i class="fa-solid fa-map-location-dot"></i>
+        <span>施設マップ・ルート</span>
+      </button>
+      <button id="tab-history" onclick="switchTab('history')" class="flex-1 py-2.5 text-center border-b-4 border-transparent text-emerald-100 hover:text-white transition flex items-center justify-center gap-1 sm:gap-1.5">
+        <i class="fa-solid fa-clock-rotate-left"></i>
+        <span>履歴</span>
+      </button>
+    </nav>
+  </header>
+
+  <!-- メインコンテンツエリア -->
+  <main class="flex-1 max-w-3xl w-full mx-auto px-4 py-5 space-y-5">
+
+    <!-- ========================================== -->
+    <!-- 1. カメラ・写真AI判定タブ -->
+    <!-- ========================================== -->
+    <section id="view-camera" class="space-y-4">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <!-- 初期ガイド/カメラビュー/撮影画像プレビュー -->
+        <div id="media-container" class="relative bg-slate-900 aspect-[4/3] sm:aspect-[16/10] flex flex-col items-center justify-center overflow-hidden">
+          <!-- 初期プレースホルダー -->
+          <div id="placeholder-state" class="text-center p-6 text-slate-300 space-y-3">
+            <div class="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto border border-slate-700">
+              <i class="fa-solid fa-camera-retro text-3xl text-emerald-400"></i>
+            </div>
+            <div>
+              <p class="font-bold text-white text-base sm:text-lg">ごみをカメラに映すか、写真を選択</p>
+              <p id="camera-guide-subtext" class="text-xs sm:text-sm text-slate-400 mt-1">四日市市の「品目別一覧表」をもとにAIが自動判定します</p>
+            </div>
+          </div>
+
+          <!-- リアルタイムカメラ映像 -->
+          <video id="camera-video" class="hidden w-full h-full object-cover" autoplay playsinline muted></video>
+
+          <!-- スキャンライン演出 -->
+          <div id="scan-overlay" class="hidden pointer-events-none absolute inset-0 border-2 border-emerald-400/50 m-4 rounded-xl">
+            <div class="camera-scan-line"></div>
+            <span class="absolute bottom-2 right-3 text-[11px] font-bold bg-black/60 text-emerald-300 px-2 py-0.5 rounded">枠内にごみを映してください</span>
+          </div>
+
+          <!-- キャプチャ・選択した画像 -->
+          <img id="captured-image" class="hidden w-full h-full object-contain bg-slate-950" alt="判定対象の画像" />
+
+          <!-- 解析中ローディングオーバーレイ -->
+          <div id="loading-overlay" class="hidden absolute inset-0 bg-slate-900/80 backdrop-blur-sm flex flex-col items-center justify-center text-white p-6 text-center z-20">
+            <div class="w-12 h-12 border-4 border-emerald-400 border-t-transparent rounded-full animate-spin mb-3"></div>
+            <p id="loading-main-text" class="font-bold text-base">四日市市の分別ルールを照合中...</p>
+            <p class="text-xs text-slate-300 mt-1">登録自治体の素材・大きさ規定・危険表示・持ち込み先をチェックしています</p>
+          </div>
+
+          <!-- カメラ切り替えボタン -->
+          <button id="switch-camera-btn" onclick="toggleCameraFacing()" class="hidden absolute top-3 right-3 bg-black/60 hover:bg-black/80 text-white p-2.5 rounded-full backdrop-blur-sm transition z-10" title="カメラ切替">
+            <i class="fa-solid fa-camera-rotate"></i>
+          </button>
+        </div>
+
+        <!-- 操作ボタン群 -->
+        <div class="p-4 bg-white space-y-3">
+          <div id="default-controls" class="grid grid-cols-2 gap-3">
+            <button onclick="startCamera()" class="bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-bold py-3.5 px-4 rounded-xl shadow-sm transition flex items-center justify-center gap-2 text-sm sm:text-base">
+              <i class="fa-solid fa-video"></i>
+              <span>カメラで映す</span>
+            </button>
+            <label class="bg-slate-100 hover:bg-slate-200 active:scale-[0.98] text-slate-800 font-bold py-3.5 px-4 rounded-xl border border-slate-300 transition flex items-center justify-center gap-2 cursor-pointer text-sm sm:text-base">
+              <i class="fa-solid fa-image text-emerald-600"></i>
+              <span>写真を選ぶ</span>
+              <input type="file" id="image-upload" accept="image/*" class="hidden" onchange="handleImageUpload(event)">
+            </label>
+          </div>
+
+          <div id="camera-active-controls" class="hidden grid grid-cols-3 gap-2.5">
+            <button onclick="stopCamera()" class="col-span-1 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-3.5 px-3 rounded-xl transition text-sm">
+              閉じる
+            </button>
+            <button onclick="captureAndAnalyze()" class="col-span-2 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-black py-3.5 px-4 rounded-xl shadow-md transition flex items-center justify-center gap-2 text-base">
+              <i class="fa-solid fa-camera"></i>
+              <span>撮影して分別判定！</span>
+            </button>
+          </div>
+
+          <!-- 補足テキスト入力 -->
+          <div class="pt-1">
+            <div class="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+              <i class="fa-solid fa-ruler-combined text-slate-400 text-sm"></i>
+              <input type="text" id="extra-context-input" placeholder="補足(例:長さ60cm、木製、電動、中身あり等)" class="w-full bg-transparent text-xs sm:text-sm focus:outline-none text-slate-700 placeholder-slate-400">
+              <button id="reanalyze-btn" onclick="reanalyzeCurrentImage()" class="hidden shrink-0 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs font-bold px-2.5 py-1 rounded-lg transition">
+                再判定
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- エラーメッセージ表示領域 -->
+      <div id="error-box" class="hidden bg-red-50 border border-red-200 text-red-800 rounded-2xl p-4 text-sm flex items-start gap-3">
+        <i class="fa-solid fa-triangle-exclamation text-red-600 mt-0.5 text-base"></i>
+        <div class="flex-1">
+          <p class="font-bold">判定エラー</p>
+          <p id="error-message" class="text-xs mt-1 leading-relaxed"></p>
+        </div>
+      </div>
+
+      <!-- AI判定結果カード -->
+      <div id="result-container" class="hidden space-y-4"></div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 2. 品目一覧検索タブ (自治体別データ内蔵辞書) -->
+    <!-- ========================================== -->
+    <section id="view-search" class="hidden space-y-4">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 space-y-3">
+        <div class="relative">
+          <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"></i>
+          <input type="text" id="dict-search-input" oninput="filterDictionary()" placeholder="品目名を入力(例:フライパン、傘、電池、布団、スプレー缶)" class="w-full pl-10 pr-10 py-3 bg-slate-50 border border-slate-300 rounded-xl text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500">
+          <button id="clear-search-btn" onclick="clearSearch()" class="hidden absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1">
+            <i class="fa-solid fa-circle-xmark"></i>
+          </button>
+        </div>
+
+        <!-- 分別区分フィルター（選択中の自治体に合わせて動的生成） -->
+        <div class="flex gap-1.5 overflow-x-auto pb-1 text-xs font-bold" id="category-filters"></div>
+
+        <!-- 五十音クイックジャンプ -->
+        <div class="flex flex-wrap gap-1 pt-1 border-t border-slate-100 text-xs font-bold" id="kana-filters"></div>
+      </div>
+
+      <div class="flex items-center justify-between px-1 text-xs text-slate-500">
+        <span id="dict-count-label">読み込み中...</span>
+        <span>※家庭ごみの分類です</span>
+      </div>
+
+      <!-- 検索結果リスト -->
+      <div id="dict-results-list" class="space-y-2.5"></div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 3. 施設マップ・ルート案内タブ -->
+    <!-- ========================================== -->
+    <section id="view-map" class="hidden space-y-4">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="font-black text-slate-800 text-sm sm:text-base flex items-center gap-2">
+            <i class="fa-solid fa-route text-emerald-600"></i>
+            <span>持ち込み・回収施設の検索とルート案内</span>
+          </h2>
+          <span id="map-muni-badge" class="text-[11px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">三重県四日市市内</span>
+        </div>
+
+        <!-- 出発地と目的地の選択フォーム -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+          <div class="space-y-1">
+            <label class="text-[11px] font-bold text-slate-500 flex items-center gap-1">
+              <i class="fa-solid fa-location-crosshairs text-blue-600"></i> 出発地(登録住所・現在地・地図クリック)
+            </label>
+            <div class="flex gap-1.5">
+              <select id="map-origin-select" onchange="handleOriginChange()" class="w-full bg-white border border-slate-300 rounded-lg px-2.5 py-2 text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"></select>
+              <button onclick="useCurrentLocation()" class="shrink-0 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1" title="現在地を取得">
+                <i class="fa-solid fa-location-arrow"></i>
+                <span class="hidden sm:inline">現在地</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="space-y-1">
+            <label class="text-[11px] font-bold text-slate-500 flex items-center gap-1">
+              <i class="fa-solid fa-flag-checkered text-rose-600"></i> 目的地の施設・回収拠点
+            </label>
+            <select id="map-dest-select" onchange="selectFacilityById(this.value, true)" class="w-full bg-white border border-slate-300 rounded-lg px-2.5 py-2 text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"></select>
+          </div>
+        </div>
+
+        <!-- 施設カテゴリフィルターチップ -->
+        <div class="flex gap-1.5 overflow-x-auto pb-1 text-xs font-bold">
+          <button onclick="filterMapFacilities('ALL')" data-fcat="ALL" class="map-cat-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-800 text-white transition">すべて表示</button>
+          <button onclick="filterMapFacilities('center')" data-fcat="center" class="map-cat-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition">クリーン・衛生センター</button>
+          <button onclick="filterMapFacilities('office')" data-fcat="office" class="map-cat-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition">環境課(相談窓口)</button>
+          <button onclick="filterMapFacilities('civic')" data-fcat="civic" class="map-cat-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition">市民センター(回収箱)</button>
+        </div>
+
+        <!-- インタラクティブマップ本体 -->
+        <div class="relative rounded-2xl overflow-hidden border-2 border-slate-200 shadow-inner">
+          <div id="yokkaichi-map" class="w-full h-[340px] sm:h-[420px] bg-slate-100"></div>
+          <div class="absolute bottom-2 left-2 z-20 bg-white/95 backdrop-blur-sm px-2.5 py-1 rounded-lg border border-slate-200 text-[11px] font-bold text-slate-600 shadow-sm pointer-events-none">
+            <i class="fa-solid fa-hand-pointer text-emerald-600"></i> 地図をタップすると出発地を変更できます
+          </div>
+        </div>
+
+        <!-- 選択中施設の詳細＆ルート案内カード -->
+        <div id="selected-facility-card" class="bg-emerald-50/70 border-2 border-emerald-200 rounded-2xl p-4 space-y-3"></div>
+      </div>
+
+      <!-- 販売店・スーパー回収拠点の補足ガイド -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 space-y-2.5">
+        <h3 class="font-bold text-slate-800 text-xs sm:text-sm flex items-center gap-1.5">
+          <i class="fa-solid fa-store text-amber-600"></i>
+          <span>スーパー・家電量販店・販売店での店頭回収対象品目</span>
+        </h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-700">
+          <div class="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+            <p class="font-bold text-slate-900">スーパー等の店頭回収ボックス</p>
+            <p class="text-slate-600 mt-0.5">白色の食品トレイ、牛乳パック、アルミ缶・ペットボトルなど（近隣のスーパー店頭をご活用ください）</p>
+          </div>
+          <div class="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+            <p class="font-bold text-slate-900">家電量販店・携帯ショップ回収</p>
+            <p class="text-slate-600 mt-0.5">充電式電池・ボタン電池、携帯電話・スマホ、パソコン、インクカートリッジ、家電リサイクル品（エアコン・テレビ・冷蔵庫・洗濯機）</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 4. 判定履歴タブ -->
+    <!-- ========================================== -->
+    <section id="view-history" class="hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <h2 class="font-bold text-slate-700 text-sm sm:text-base">最近のAI分別判定履歴</h2>
+        <button onclick="clearHistory()" class="text-xs text-red-600 hover:text-red-700 font-bold px-2.5 py-1 rounded-lg hover:bg-red-50 transition">
+          履歴を削除
+        </button>
+      </div>
+      <div id="history-list" class="space-y-3"></div>
+    </section>
+
+  </main>
+
+  <!-- 共通ルールモーダル -->
+  <div id="rule-modal" class="hidden fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-lg w-full max-h-[85vh] flex flex-col shadow-xl overflow-hidden">
+      <div class="p-4 bg-emerald-700 text-white flex items-center justify-between">
+        <h3 id="rule-modal-title" class="font-black text-base sm:text-lg flex items-center gap-2">
+          <i class="fa-solid fa-book-open"></i>
+          <span>四日市市 ごみ分別の重要ルール</span>
+        </h3>
+        <button onclick="closeRuleModal()" class="text-white/80 hover:text-white p-1">
+          <i class="fa-solid fa-xmark text-xl"></i>
+        </button>
+      </div>
+      <div id="rule-modal-body" class="p-5 overflow-y-auto space-y-4 text-sm text-slate-700 leading-relaxed"></div>
+      <div class="p-3 bg-slate-50 border-t border-slate-200 text-right">
+        <button onclick="closeRuleModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-5 py-2 rounded-xl text-sm transition">
+          閉じる
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全国47都道府県・住所・自治体登録モーダル -->
+  <div id="municipality-modal" class="hidden fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-lg w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+      <div class="p-4 bg-gradient-to-r from-emerald-700 to-teal-700 text-white flex items-center justify-between">
+        <h3 class="font-black text-base sm:text-lg flex items-center gap-2">
+          <i class="fa-solid fa-map"></i>
+          <span>全国・都道府県別 自治体データ選択</span>
+        </h3>
+        <button onclick="closeMunicipalityModal()" class="text-white/80 hover:text-white p-1">
+          <i class="fa-solid fa-xmark text-xl"></i>
+        </button>
+      </div>
+
+      <div class="p-5 overflow-y-auto space-y-4 text-sm text-slate-700">
+        <!-- 現在の登録状況 -->
+        <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center justify-between gap-2">
+          <div>
+            <span class="text-[11px] font-bold text-emerald-700">現在適用中の自治体・拠点</span>
+            <p id="modal-current-muni" class="font-black text-slate-900 text-sm sm:text-base">三重県四日市市</p>
+          </div>
+          <span id="modal-db-stats" class="shrink-0 text-[11px] font-bold bg-white text-emerald-800 border border-emerald-300 px-2.5 py-1 rounded-lg">
+            登録済: 2自治体
+          </span>
+        </div>
+
+        <!-- 1. 都道府県・自治体マスターDBから選択 -->
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-black text-slate-800 flex items-center gap-1.5">
+              <i class="fa-solid fa-database text-emerald-600"></i>
+              <span>① 都道府県・登録済み自治体から選ぶ</span>
+            </label>
+            <span class="text-[10px] text-slate-500">47都道府県スロット対応</span>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label class="block text-[11px] font-bold text-slate-500 mb-1">都道府県</label>
+              <select id="prefecture-select" onchange="onPrefectureSelectChange()" class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+                <!-- JSで47都道府県を動的生成 -->
+              </select>
+            </div>
+            <div>
+              <label class="block text-[11px] font-bold text-slate-500 mb-1">市区町村（データ登録済）</label>
+              <select id="municipality-select" class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+                <!-- JSで選択中の都道府県の自治体を動的生成 -->
+              </select>
+            </div>
+          </div>
+
+          <div id="pref-slot-notice" class="text-[11px] text-slate-600 bg-white p-2 rounded-lg border border-slate-200"></div>
+
+          <button id="apply-db-muni-btn" onclick="applySelectedDbMunicipality()" class="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-black py-2.5 px-4 rounded-xl text-xs sm:text-sm shadow-sm transition flex items-center justify-center gap-1.5">
+            <i class="fa-solid fa-circle-check"></i>
+            <span>選択した登録済み自治体データを適用する</span>
+          </button>
+        </div>
+
+        <!-- 2. 住所・GPS・AI検索から取得（未登録自治体用） -->
+        <div class="border-t border-slate-200 pt-3.5 space-y-2.5">
+          <label class="text-xs font-black text-slate-800 flex items-center gap-1.5">
+            <i class="fa-solid fa-magnifying-glass-location text-blue-600"></i>
+            <span>② 住所入力・GPSから自動検索して設定</span>
+          </label>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            データベース未登録の自治体でも、住所や市区町村名を入力すると登録済みDBの検索またはAI調査により分別ルールを適用できます。
+          </p>
+          <div class="flex gap-2">
+            <input type="text" id="address-input" placeholder="例:三重県桑名市、東京都新宿区、大阪府大阪市..." class="flex-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500">
+            <button onclick="detectAddressFromGPS()" class="shrink-0 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 font-bold px-3 py-2.5 rounded-xl text-xs transition flex items-center gap-1" title="GPSから現在地の住所を取得">
+              <i class="fa-solid fa-location-crosshairs"></i>
+              <span>現在地</span>
+            </button>
+          </div>
+
+          <div class="flex flex-wrap gap-1.5 text-xs pt-0.5">
+            <span class="text-[11px] font-bold text-slate-400 self-center">クイック選択:</span>
+            <button onclick="selectQuickMunicipality('三重県', '四日市市')" class="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold">三重県四日市市</button>
+            <button onclick="selectQuickMunicipality('三重県', '桑名市')" class="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold">三重県桑名市</button>
+            <button onclick="fillAddressSample('東京都新宿区')" class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium">東京都新宿区</button>
+            <button onclick="fillAddressSample('愛知県名古屋市')" class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium">愛知県名古屋市</button>
+          </div>
+        </div>
+
+        <!-- 自治体取得ローディング表示 -->
+        <div id="muni-loading" class="hidden bg-slate-900 text-white rounded-xl p-4 text-center space-y-2">
+          <div class="w-8 h-8 border-4 border-emerald-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p class="font-bold text-xs sm:text-sm">自治体の公式ごみ分別ルールと施設マップを検索・構築中...</p>
+          <p class="text-[11px] text-slate-300">分別区分・サイズ規定・クリーンセンター・回収拠点データを取得しています</p>
+        </div>
+
+        <!-- 自治体取得エラー表示 -->
+        <div id="muni-error" class="hidden bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-xs font-bold"></div>
+      </div>
+
+      <div class="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+        <button onclick="closeMunicipalityModal()" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold text-slate-600 hover:bg-slate-200 transition">
+          キャンセル
+        </button>
+        <button id="save-muni-btn" onclick="registerMunicipalityByAddress()" class="bg-slate-800 hover:bg-slate-900 active:scale-[0.98] text-white font-black px-5 py-2.5 rounded-xl text-xs sm:text-sm shadow-sm transition flex items-center gap-1.5">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <span>入力した住所で検索・適用</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 非表示キャンバス(カメラキャプチャ用) -->
+  <canvas id="capture-canvas" class="hidden"></canvas>
+
+  <script>
+    // =========================================================================
+    // 0. 全国47都道府県リスト（地方区分付きマスター定義）
+    // =========================================================================
+    const PREFECTURE_REGIONS = [
+      { region: "北海道・東北", prefs: ["北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県"] },
+      { region: "関東", prefs: ["茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県"] },
+      { region: "中部（甲信越・北陸・東海）", prefs: ["新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県", "岐阜県", "静岡県", "愛知県", "三重県"] },
+      { region: "近畿", prefs: ["滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県"] },
+      { region: "中国", prefs: ["鳥取県", "島根県", "岡山県", "広島県", "山口県"] },
+      { region: "四国", prefs: ["徳島県", "香川県", "愛媛県", "高知県"] },
+      { region: "九州・沖縄", prefs: ["福岡県", "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"] }
+    ];
+
+    // =========================================================================
+    // 1. 【全国・各都道府県・各自治体 データ格納スペース】
+    // =========================================================================
+    // ★ ここに全国の都道府県・市区町村データを追加していけます！
+    // ★ 各都道府県キー（例: "東京都": { ... }）のブロック内に、市区町村オブジェクトを追加してください。
+    //
+    // 【新規自治体データ追加用テンプレート（コピー＆ペーストして使用してください）】
+    /*
+    "市区町村名": {
+      id: "muni_english_id",
+      prefecture: "都道府県名",
+      municipality: "市区町村名",
+      fullTitle: "都道府県名市区町村名",
+      shortName: "短縮名",
+      userAddress: "デフォルト拠点住所（例：〇〇市役所周辺）",
+      centerLat: 35.6812,
+      centerLng: 139.7671,
+      isOfficialData: true,
+      categories: [
+        "可燃ごみ", "不燃ごみ", "資源ごみ", "プラスチック製容器包装", "粗大ごみ", "市では収集しません"
+      ],
+      rulesSummary: [
+        {
+          title: "基本ルール見出し",
+          color: "emerald", // "amber" | "blue" | "red" | "emerald" から選択
+          icon: "fa-recycle", // "fa-ruler" | "fa-scissors" | "fa-triangle-exclamation" | "fa-recycle"
+          text: "ルールの詳細説明テキスト"
+        }
+      ],
+      aiPromptRules: `
+        【〇〇市特有の重要ルール】
+        1. サイズ規定: 〇〇cmを超えるものは粗大ごみ。
+        2. プラスチック分別: プラマーク付きは資源、それ以外は可燃ごみ。
+      `,
+      facilities: [
+        {
+          id: "muni_clean_center",
+          type: "center", // "center"(処理施設) | "office"(相談窓口) | "civic"(回収ボックス拠点)
+          typeLabel: "直接持ち込み処理施設",
+          name: "〇〇市クリーンセンター",
+          address: "都道府県市区町村〇〇1-2-3",
+          lat: 35.6850,
+          lng: 139.7700,
+          hours: "月曜〜金曜 8:30〜16:30",
+          phone: "000-000-0000",
+          targets: "粗大ごみ、多量ごみ",
+          note: "自己搬入時は本人確認書類が必要です。",
+          color: "#059669" // #059669(緑), #7c3aed(紫), #2563eb(青)
+        }
+      ],
+      items: [
+        { kana: "あ", name: "アイロン", cat: "不燃ごみ", note: "コードは束ねて出す", facilityId: "" },
+        { kana: "か", name: "傘", cat: "不燃ごみ", note: "", facilityId: "" }
+      ]
+    },
+    */
+
+    const NATIONAL_MUNICIPALITY_DB = {
+      // -----------------------------------------------------------------------
+      // 【北海道・東北地方】
+      // -----------------------------------------------------------------------
+      "北海道": {
+        // 例: "札幌市": { ... } をここに追加
+      },
+      "青森県": {
+        // 例: "青森市": { ... } をここに追加
+      },
+      "岩手県": {
+        // 例: "盛岡市": { ... } をここに追加
+      },
+      "宮城県": {
+        // 例: "仙台市": { ... } をここに追加
+      },
+      "秋田県": {
+        // 例: "秋田市": { ... } をここに追加
+      },
+      "山形県": {
+        // 例: "山形市": { ... } をここに追加
+      },
+      "福島県": {
+        // 例: "福島市": { ... } をここに追加
+      },
+
+      // -----------------------------------------------------------------------
+      // 【関東地方】
+      // -----------------------------------------------------------------------
+      "茨城県": {
+        // 例: "水戸市": { ... } をここに追加
+      },
+      "栃木県": {
+        // 例: "宇都宮市": { ... } をここに追加
+      },
+      "群馬県": {
+        // 例: "前橋市": { ... } をここに追加
+      },
+      "埼玉県": {
+        // 例: "さいたま市": { ... } をここに追加
+      },
+      "千葉県": {
+        // 例: "千葉市": { ... } をここに追加
+      },
+      "東京都": {
+        // 例: "新宿区": { ... }, "世田谷区": { ... } をここに追加
+      },
+      "神奈川県": {
+        // 例: "横浜市": { ... }, "川崎市": { ... } をここに追加
+      },
+
+      // -----------------------------------------------------------------------
+      // 【中部地方（甲信越・北陸・東海）】
+      // -----------------------------------------------------------------------
+      "新潟県": {
+        // 例: "新潟市": { ... } をここに追加
+      },
+      "富山県": {
+        // 例: "富山市": { ... } をここに追加
+      },
+      "石川県": {
+        // 例: "金沢市": { ... } をここに追加
+      },
+      "福井県": {
+        // 例: "福井市": { ... } をここに追加
+      },
+      "山梨県": {
+        // 例: "甲府市": { ... } をここに追加
+      },
+      "長野県": {
+        // 例: "長野市": { ... } をここに追加
+      },
+      "岐阜県": {
+        // 例: "岐阜市": { ... } をここに追加
+      },
+      "静岡県": {
+        // 例: "静岡市": { ... }, "浜松市": { ... } をここに追加
+      },
+      "愛知県": {
+        // 例: "名古屋市": { ... } をここに追加
+      },
+      "三重県": {
+        // ▼ 登録済み自治体 1: 三重県四日市市（公式品目別一覧表データ）
+        "四日市市": {
+          id: "yokkaichi",
+          prefecture: "三重県",
+          municipality: "四日市市",
+          fullTitle: "三重県四日市市",
+          shortName: "四日市",
+          userAddress: "近鉄四日市駅周辺",
+          centerLat: 34.9675,
+          centerLng: 136.6185,
+          isOfficialData: true,
+          categories: [
+            "可燃ごみ", "破砕ごみ", "資源物(小型家電)", "資源物(金属類)",
+            "資源物(紙類)", "資源物(布・衣類)", "資源物(びん)", "資源物(飲料缶)",
+            "資源物(スプレー缶)", "資源物(蛍光管)", "資源物(乾電池・水銀体温計)",
+            "資源物(ライター)", "ペットボトル", "粗大ごみ指定品目", "市では収集しません"
+          ],
+          rulesSummary: [
+            { title: "1m（メートル）ルール", color: "amber", icon: "fa-ruler", text: "備考に「1mを超えるものは原形のままでは集積場に出せません」とある品目は、直接クリーンセンターへ持ち込むか、1m以下に分解・切断すれば集積場に出せます。" },
+            { title: "50cmルール（プラスチック・木製品など）", color: "blue", icon: "fa-scissors", text: "バケツ・衣装ケース・木くず・マット・発泡スチロール・ぬいぐるみ等の多くは、50cm以下なら「可燃ごみ」、50cmを超えると「破砕ごみ」になります。" },
+            { title: "危険物の表示ルール", color: "red", icon: "fa-triangle-exclamation", text: "刃物類は厚紙で包み「刃物危険」、割れ物は箱に入れ「ガラス危険」と表示。カッターの刃・画鋲・針はふた付きの缶へ。スプレー缶は中身を使い切る。" },
+            { title: "資源物（布・衣類・紙類・小型家電）の注意", color: "emerald", icon: "fa-shirt", text: "布・衣類は透明/半透明袋に入れ雨の日は出さない。紙類は十字にひもでしばる（内側が銀色の紙パックは可燃ごみ）。小型家電は電池を抜く。" }
+          ],
+          aiPromptRules: `
+【四日市市特有の重要ルール】
+1. 50cmルール: プラスチック製品（バケツ、収納ケース、トレイ、ハンガー以外の箱類等）、木くず、マット、クッション、まくら、ぬいぐるみ、かばん、ほうき、ホース等は「50cm以下なら可燃ごみ」「50cmを超えると破砕ごみ」になる。
+2. 1mルール: 金属ラック、網戸(金属枠)、物干し竿、アンテナ、ふとん、カーペット、スキー板、スノーボード等は「1mを超えるものは原形のままでは集積場に出せません（1m以下に分解・切断するかクリーンセンターへ持ち込む）」。
+3. 家電リサイクル法対象品目（「市では収集しません」）: エアコン、テレビ、冷蔵庫・冷凍庫、洗濯機、衣類乾燥機、ワインセラー、ホームフリーザー。
+4. 粗大ごみ指定品目（戸別有料収集）: いす、ソファー、テーブル、机、ベッド、スプリングマットレス、たんす、食器棚、本棚、下駄箱、鏡台(ドレッサー)、テレビ台、オーディオラック、サイドボード、座卓、パイプベッド、ルームランナー等。
+5. 刃物・ガラス危険表示: 包丁・ナイフ・ハサミ・カッターナイフ・鎌・のこぎり等は刃を厚紙や段ボールで包み「刃物危険」と表示して資源物(金属類)。ガラス食器・鏡・板ガラス・せともの等は箱に入れ「ガラス危険(割れ物危険)」と表示して破砕ごみ。
+6. ペットボトルとプラスチック容器の違い: 飲料・酒類・しょうゆ等のPETマーク付きボトルは「ペットボトル」（キャップ・ラベルは可燃ごみ）。シャンプー・洗剤・マヨネーズ・食用油・弁当箱・食品トレイ・プラ袋等のプラ容器は「可燃ごみ」。
+          `,
+          facilities: [
+            {
+              id: "clean_center",
+              type: "center",
+              typeLabel: "直接持ち込み処理施設",
+              name: "四日市市クリーンセンター",
+              address: "三重県四日市市垂坂町1536",
+              lat: 35.0124,
+              lng: 136.6188,
+              hours: "月曜〜金曜 8:30〜12:00 / 13:00〜16:30（祝日含む・年末年始除く）",
+              phone: "059-331-2652",
+              targets: "1mを超える粗大物、多量の枝・葉類、ウォーターサーバー、エレクトーン・オルガン、金庫、浴槽、トタンなど",
+              note: "自己搬入（有料：10kgごとに手数料が必要）です。運転免許証など市内在住を確認できる書類を持参してください。",
+              color: "#059669"
+            },
+            {
+              id: "kusu_center",
+              type: "center",
+              typeLabel: "直接持ち込み処理施設",
+              name: "楠衛生センター",
+              address: "三重県四日市市楠町北五味塚2060-1",
+              lat: 34.9098,
+              lng: 136.6254,
+              hours: "月曜〜金曜 8:30〜12:00 / 13:00〜16:30",
+              phone: "059-397-3214",
+              targets: "多量の金属製トタン、リヤカー（資源物・金属類）などの持ち込み",
+              note: "持ち込み可能な品目・受付条件については事前に電話でご確認ください。",
+              color: "#059669"
+            },
+            {
+              id: "seikatsu_kankyo",
+              type: "office",
+              typeLabel: "市役所・相談窓口",
+              name: "四日市市役所 生活環境課（本庁舎5階）",
+              address: "三重県四日市市諏訪町1-5",
+              lat: 34.9651,
+              lng: 136.6244,
+              hours: "月曜〜金曜 8:30〜17:15（土日祝・年末年始除く）",
+              phone: "059-354-8192",
+              targets: "水銀血圧計の処分相談、多量の土・タイル・れんがの処分相談",
+              note: "水銀血圧計は集積場に出せません。処分方法については生活環境課へご相談ください。",
+              color: "#7c3aed"
+            },
+            {
+              id: "civic_shimin_madoguchi",
+              type: "civic",
+              typeLabel: "回収ボックス拠点",
+              name: "四日市市 市民窓口サービスセンター（近鉄四日市駅高架下）",
+              address: "三重県四日市市安島1-1-56",
+              lat: 34.9678,
+              lng: 136.6181,
+              hours: "10:00〜19:00（第2・第4土曜および年末年始を除く）",
+              phone: "059-359-6521",
+              targets: "使用済みインクカートリッジ、小型家電回収ボックス対象品目など",
+              note: "市内各地区市民センターにもインクカートリッジや小型家電の回収ボックスが設置されています。",
+              color: "#2563eb"
+            },
+            {
+              id: "civic_tomida",
+              type: "civic",
+              typeLabel: "地区市民センター",
+              name: "富田地区市民センター",
+              address: "三重県四日市市富田二丁目4-15",
+              lat: 35.0063,
+              lng: 136.6479,
+              hours: "月曜〜金曜 8:30〜17:15（土日祝除く）",
+              phone: "059-365-1101",
+              targets: "使用済みインクカートリッジ回収箱、小型家電回収ボックス",
+              note: "地区市民センターの開館時間内に回収ボックスをご利用ください。",
+              color: "#2563eb"
+            },
+            {
+              id: "civic_hinaga",
+              type: "civic",
+              typeLabel: "地区市民センター",
+              name: "日永地区市民センター",
+              address: "三重県四日市市日永西三丁目3-31",
+              lat: 34.9431,
+              lng: 136.6085,
+              hours: "月曜〜金曜 8:30〜17:15（土日祝除く）",
+              phone: "059-345-4131",
+              targets: "使用済みインクカートリッジ回収箱、小型家電回収ボックス",
+              note: "地区市民センターの開館時間内に回収ボックスをご利用ください。",
+              color: "#2563eb"
+            }
+          ],
+          items: [
+            // あ行
+            { kana: "あ", name: "ICレコーダ", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "IH調理器", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "アイスノン", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "アイスピック", cat: "資源物(金属類)", note: "とがった部分を厚紙や段ボールなどで包む" },
+            { kana: "あ", name: "アイロン", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "アイロン台", cat: "破砕ごみ", note: "" },
+            { kana: "あ", name: "アクセサリー(金属製)", cat: "資源物(金属類)", note: "貝・骨製、プラスチック製のものは可燃ごみ" },
+            { kana: "あ", name: "油(食用)", cat: "可燃ごみ", note: "固化処理するか、紙や古布に染み込ませる" },
+            { kana: "あ", name: "油で汚れた紙、布", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "油類(灯油・ガソリン・オイル類)", cat: "市では収集しません", note: "交換した所、販売店などに問い合わせてください" },
+            { kana: "あ", name: "編み機", cat: "資源物(金属類)", note: "" },
+            { kana: "あ", name: "網戸(網)", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "網戸(金属枠)", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "あ", name: "アルバム(のり付き紙製)", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "アルミ缶(飲料缶)", cat: "資源物(飲料缶)", note: "中身を抜き、軽く水洗いする" },
+            { kana: "あ", name: "アルミシート", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "アルミ箔、アルミホイル", cat: "資源物(金属類)", note: "汚れのひどいものは可燃ごみ" },
+            { kana: "あ", name: "アンテナ", cat: "資源物(小型家電)", note: "1mを超えるものは原形のままでは集積場に出せません。業者が交換したものは収集できません", facilityId: "clean_center" },
+            { kana: "あ", name: "衣装ケース(プラスチック製)", cat: "破砕ごみ", note: "1mを超えるものは原形のままでは集積場に出せません。金属製のものは資源物(金属類)", facilityId: "clean_center" },
+            { kana: "あ", name: "いす", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "あ", name: "板ガラス", cat: "破砕ごみ", note: "危なくないよう、箱などに入れ「ガラス危険」と表示する" },
+            { kana: "あ", name: "一升びん", cat: "資源物(びん)", note: "できるだけ販売店に返す" },
+            { kana: "あ", name: "一斗缶", cat: "資源物(金属類)", note: "中身を使い切る" },
+            { kana: "あ", name: "イヤホン", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "衣類", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない。汚れのひどいものは可燃ごみ" },
+            { kana: "あ", name: "衣類乾燥機", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "あ", name: "入れ歯", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "印鑑", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "インクカートリッジ(パソコン用)", cat: "可燃ごみ", note: "販売店や地区市民センターの回収箱などもご利用ください", facilityId: "civic_shimin_madoguchi" },
+            { kana: "あ", name: "印刷機(トナー含む)", cat: "資源物(小型家電)", note: "事業活動で発生したものは収集・処理しません" },
+            { kana: "あ", name: "飲料用紙パック(牛乳・ジュース)", cat: "資源物(紙類)", note: "開いて十字にひもでしばる。内側が銀色のものは可燃ごみ" },
+            { kana: "あ", name: "植木鉢(プラスチック製)", cat: "可燃ごみ", note: "土を取り除く" },
+            { kana: "あ", name: "植木鉢(素焼き)", cat: "破砕ごみ", note: "土を取り除く" },
+            { kana: "あ", name: "ウェットティッシュ", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "ウォーターサーバー", cat: "市では収集しません", note: "販売店などに引き取りを依頼するか、市クリーンセンターへ持ち込む", facilityId: "clean_center" },
+            { kana: "あ", name: "浮き輪", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "うちわ", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "腕時計", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "羽毛布団", cat: "破砕ごみ", note: "小さくたたんで、ひもでしばる(1m以下)" },
+            { kana: "あ", name: "エアークッション", cat: "可燃ごみ", note: "" },
+            { kana: "あ", name: "エアコン(家庭用)", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "あ", name: "液晶テレビ", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "あ", name: "枝・葉類", cat: "可燃ごみ", note: "週の後半に出す。多量の場合は四日市市クリーンセンターへ直接持ち込む", facilityId: "clean_center" },
+            { kana: "あ", name: "枝きりばさみ", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "あ", name: "絵本", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "あ", name: "LED電球", cat: "資源物(蛍光管)", note: "" },
+            { kana: "あ", name: "エレクトーン", cat: "市では収集しません", note: "販売店などに引き取りを依頼するか、四日市市クリーンセンターへ持ち込む", facilityId: "clean_center" },
+            { kana: "あ", name: "園芸用支柱", cat: "資源物(金属類)", note: "プラスチック製のものは破砕ごみ" },
+            { kana: "あ", name: "延長コード", cat: "資源物(金属類)", note: "まとめてしばる。テーブルタップなどは外さなくてよい" },
+            { kana: "あ", name: "鉛筆削り器(手動/電動)", cat: "可燃ごみ", note: "電動のものは資源物(小型家電)、金属製のものは資源物(金属類)" },
+            { kana: "あ", name: "オートバイ(原付自転車含む)", cat: "市では収集しません", note: "廃棄二輪車取扱店などに引き取りを依頼する" },
+            { kana: "あ", name: "オーブントースター", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "オーブンレンジ", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "オイルヒーター", cat: "資源物(小型家電)", note: "" },
+            { kana: "あ", name: "桶", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ。金属製のものは資源物(金属類)" },
+            { kana: "あ", name: "お玉(金属製)", cat: "資源物(金属類)", note: "プラスチック製のものや木製のものは可燃ごみ" },
+            { kana: "あ", name: "お茶の缶", cat: "資源物(金属類)", note: "中身を使い切る。プラスチック製の中ぶたは可燃ごみ" },
+            { kana: "あ", name: "斧(おの)", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "あ", name: "折り畳みベッド", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "あ", name: "おむつ", cat: "可燃ごみ", note: "汚物はトイレに流す" },
+            { kana: "あ", name: "おもちゃ(プラスチック製)", cat: "可燃ごみ", note: "電動のものは電池を抜いて資源物(小型家電)" },
+            { kana: "あ", name: "オルガン", cat: "市では収集しません", note: "販売店などに引き取りを依頼するか、四日市市クリーンセンターへ持ち込む", facilityId: "clean_center" },
+            { kana: "あ", name: "温度計", cat: "破砕ごみ", note: "水銀計は資源物(乾電池・水銀体温計)" },
+            // か行
+            { kana: "か", name: "カーテン(レース含む)", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない。汚れのひどいものは可燃ごみ" },
+            { kana: "か", name: "カーテンレール", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "か", name: "カーペット", cat: "破砕ごみ", note: "十字にしばって出す" },
+            { kana: "か", name: "懐中電灯", cat: "資源物(小型家電)", note: "電池を抜く" },
+            { kana: "か", name: "カイロ(使い捨て)", cat: "可燃ごみ", note: "一度反応させ、熱が冷めてから出す" },
+            { kana: "か", name: "鏡", cat: "破砕ごみ", note: "危なくないよう、箱などに入れ「ガラス危険」と表示する" },
+            { kana: "か", name: "鍵", cat: "資源物(金属類)", note: "" },
+            { kana: "か", name: "傘", cat: "破砕ごみ", note: "" },
+            { kana: "か", name: "加湿器", cat: "資源物(小型家電)", note: "" },
+            { kana: "か", name: "菓子の缶", cat: "資源物(金属類)", note: "中をからにする" },
+            { kana: "か", name: "菓子箱", cat: "資源物(紙類)", note: "開いて十字にひもでしばる" },
+            { kana: "か", name: "ガスコンロ(ガステーブル)", cat: "資源物(金属類)", note: "電池を抜く" },
+            { kana: "か", name: "カセットボンベ(卓上用)", cat: "資源物(スプレー缶)", note: "中身を使い切る" },
+            { kana: "か", name: "カッターナイフ", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "か", name: "カッターの刃", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "か", name: "カップラーメン容器、上ぶた", cat: "可燃ごみ", note: "" },
+            { kana: "か", name: "かばん", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "か", name: "画鋲", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "か", name: "花瓶(ガラス製、陶磁器製)", cat: "破砕ごみ", note: "プラスチック製のものは可燃ごみ" },
+            { kana: "か", name: "鎌(かま)", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "か", name: "かみそり(金属製)", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "か", name: "紙袋", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "か", name: "カメラ", cat: "資源物(小型家電)", note: "電池を抜く" },
+            { kana: "か", name: "カラーボックス(木製)", cat: "破砕ごみ", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "か", name: "ガラス食器", cat: "破砕ごみ", note: "割れたものは箱などに入れ、「ガラス危険」と表示する" },
+            { kana: "か", name: "カレンダー", cat: "資源物(紙類)", note: "十字にひもでしばる。とじ部分(金属製)は資源物(金属類)" },
+            { kana: "か", name: "革靴", cat: "可燃ごみ", note: "" },
+            { kana: "か", name: "缶(飲料缶)", cat: "資源物(飲料缶)", note: "中身を抜き、軽く水洗いする" },
+            { kana: "か", name: "缶(飲料缶以外)", cat: "資源物(金属類)", note: "中身を使い切り、軽く水洗いする" },
+            { kana: "か", name: "缶(スプレー缶)", cat: "資源物(スプレー缶)", note: "中身を使い切る" },
+            { kana: "か", name: "乾電池", cat: "資源物(乾電池・水銀体温計)", note: "透明または半透明の袋に入れて「乾電池・水銀体温計」と表示する" },
+            { kana: "か", name: "キーボード(パソコン・楽器)", cat: "資源物(小型家電)", note: "" },
+            { kana: "か", name: "木くず", cat: "可燃ごみ", note: "太さ5cm以下・長さ50cm以下にして週後半へ。太さ5cm超(20cm以下)は長さ1m以下にして破砕ごみ" },
+            { kana: "か", name: "ギター", cat: "破砕ごみ", note: "" },
+            { kana: "か", name: "着物・着物の帯", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない" },
+            { kana: "か", name: "脚立(金属製)", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "か", name: "牛乳パック", cat: "資源物(紙類)", note: "開いて十字にひもでしばる。内側が銀色のものは可燃ごみ" },
+            { kana: "か", name: "金庫", cat: "市では収集しません", note: "四日市市クリーンセンターへ持ち込む。手提げ用の金庫は資源物(金属類)", facilityId: "clean_center" },
+            { kana: "か", name: "金属ラック", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "か", name: "クーラーボックス", cat: "破砕ごみ", note: "" },
+            { kana: "か", name: "空気清浄機", cat: "資源物(小型家電)", note: "" },
+            { kana: "か", name: "釘", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "か", name: "草花", cat: "可燃ごみ", note: "週の後半に出す。多量の場合は四日市市クリーンセンターへ直接持ち込む", facilityId: "clean_center" },
+            { kana: "か", name: "靴", cat: "可燃ごみ", note: "" },
+            { kana: "か", name: "クッション", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "か", name: "ゲーム機", cat: "資源物(小型家電)", note: "電池を抜く" },
+            { kana: "か", name: "蛍光管", cat: "資源物(蛍光管)", note: "LEDを含む。割れないように保護カバーなどに入れる" },
+            { kana: "か", name: "珪藻土バスマット", cat: "破砕ごみ", note: "集積場に出す場合は袋を二重にするなど必ず養生してください" },
+            { kana: "か", name: "携帯電話", cat: "資源物(小型家電)", note: "個人情報など削除したうえで出す。モバイルリサイクルも活用" },
+            { kana: "か", name: "下駄箱", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "か", name: "血圧計", cat: "資源物(小型家電)", note: "水銀血圧計は集積場には出せませんので、生活環境課にご相談ください", facilityId: "seikatsu_kankyo" },
+            { kana: "か", name: "コーヒーメーカー", cat: "資源物(小型家電)", note: "" },
+            { kana: "か", name: "こたつ(ホームこたつ)", cat: "資源物(小型家電)", note: "脚を外す。天板は破砕ごみ(1m超は集積場不可)", facilityId: "clean_center" },
+            { kana: "か", name: "こたつ掛けぶとん", cat: "破砕ごみ", note: "小さくたたんで、ひもでしばる(1m以下)" },
+            { kana: "か", name: "コップ(ガラス製)", cat: "破砕ごみ", note: "ガラス製以外のものは可燃ごみ" },
+            { kana: "か", name: "ごみ箱(プラスチック製)", cat: "破砕ごみ", note: "50cm以下のものは可燃ごみ。金属製のものは資源物(金属類)" },
+            { kana: "か", name: "ゴルフクラブ", cat: "資源物(金属類)", note: "" },
+            { kana: "か", name: "コンクリート類", cat: "破砕ごみ", note: "土のう袋に入れて片手で持てる量を2袋程度。業者が解体したものは収集・処理できません" },
+            // さ行
+            { kana: "さ", name: "座椅子", cat: "破砕ごみ", note: "1m超は集積場不可。家具調・ソファータイプのものは粗大ごみ戸別有料収集指定品目" },
+            { kana: "さ", name: "雑誌", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "さ", name: "ざぶとん", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ。複数の場合は十字にひもでしばる" },
+            { kana: "さ", name: "皿(ガラス製、陶磁器製)", cat: "破砕ごみ", note: "プラスチック製・紙製・木製は可燃ごみ、金属製は資源物(金属類)" },
+            { kana: "さ", name: "シーツ", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない" },
+            { kana: "さ", name: "CDソフト(ケース含む)", cat: "可燃ごみ", note: "" },
+            { kana: "さ", name: "自転車(電動アシスト自転車含む)", cat: "資源物(金属類)", note: "電動アシスト自転車のバッテリーは外して資源物(乾電池・水銀体温計)" },
+            { kana: "さ", name: "シャンプーの容器", cat: "可燃ごみ", note: "中身を使い切り、軽く水洗いする" },
+            { kana: "さ", name: "シュレッダー紙ごみ", cat: "可燃ごみ", note: "四日市市指定ごみ収集袋に入れ、空気を抜く" },
+            { kana: "さ", name: "じゅうたん", cat: "破砕ごみ", note: "小さくたたんで、ひもでしばる(1m以下)" },
+            { kana: "さ", name: "充電器", cat: "資源物(小型家電)", note: "" },
+            { kana: "さ", name: "充電式電池", cat: "資源物(乾電池・水銀体温計)", note: "販売店などに設置されている回収箱も利用する" },
+            { kana: "さ", name: "収納ケース(プラスチック製)", cat: "破砕ごみ", note: "50cm以下のものは可燃ごみ" },
+            { kana: "さ", name: "消火器", cat: "市では収集しません", note: "特定窓口に引取依頼" },
+            { kana: "さ", name: "照明器具", cat: "資源物(小型家電)", note: "電球や蛍光管は資源物(蛍光管)" },
+            { kana: "さ", name: "しょうゆの容器(ペットボトル)", cat: "ペットボトル", note: "キャップ、ラベルを取り、水洗いする" },
+            { kana: "さ", name: "除湿機", cat: "資源物(小型家電)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "さ", name: "食器(プラスチック製)", cat: "可燃ごみ", note: "金属製のものは資源物(金属類)" },
+            { kana: "さ", name: "食器(陶磁器・ガラス製)", cat: "破砕ごみ", note: "" },
+            { kana: "さ", name: "食器棚", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "さ", name: "食品トレイ(白色・色柄)", cat: "可燃ごみ", note: "白色はできるだけスーパーなどの回収ボックスを利用する" },
+            { kana: "さ", name: "新聞紙・チラシ", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "さ", name: "スーツケース", cat: "破砕ごみ", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "さ", name: "水槽", cat: "破砕ごみ", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "さ", name: "水筒(金属製)", cat: "資源物(金属類)", note: "プラスチック製のものは可燃ごみ" },
+            { kana: "さ", name: "炊飯器", cat: "資源物(小型家電)", note: "" },
+            { kana: "さ", name: "スキー板・スノーボード", cat: "破砕ごみ", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "さ", name: "ストーブ・石油ストーブ", cat: "資源物(金属類)", note: "灯油・電池を必ず抜く" },
+            { kana: "さ", name: "スニーカー", cat: "可燃ごみ", note: "" },
+            { kana: "さ", name: "スプリングマットレス", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "さ", name: "スプレー缶", cat: "資源物(スプレー缶)", note: "中身を使い切る" },
+            { kana: "さ", name: "スマートフォン", cat: "資源物(小型家電)", note: "個人情報など削除したうえで出す。モバイルリサイクルも活用" },
+            { kana: "さ", name: "せともの", cat: "破砕ごみ", note: "割れたものは箱などに入れ、「割れ物危険」と表示する" },
+            { kana: "さ", name: "洗濯機", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "さ", name: "扇風機", cat: "資源物(小型家電)", note: "" },
+            { kana: "さ", name: "掃除機", cat: "資源物(小型家電)", note: "掃除機の紙パック、掃除機のごみは可燃ごみ" },
+            { kana: "さ", name: "ソファー", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            // た行
+            { kana: "た", name: "体温計(電子)", cat: "資源物(小型家電)", note: "電池を抜く。水銀体温計は資源物(乾電池・水銀体温計)" },
+            { kana: "た", name: "体重計(ヘルスメーター)", cat: "資源物(小型家電)", note: "電池を抜く" },
+            { kana: "た", name: "タイヤ", cat: "市では収集しません", note: "交換した所、販売店などに引き取りを依頼する" },
+            { kana: "た", name: "タオル・タオルケット", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない。汚れのひどいものは可燃ごみ" },
+            { kana: "た", name: "畳", cat: "破砕ごみ", note: "1m超は集積場不可。リフォーム等の場合は業者に処理を依頼", facilityId: "clean_center" },
+            { kana: "た", name: "タブレットPC", cat: "資源物(小型家電)", note: "個人情報など削除したうえで出す。PCリサイクルも活用" },
+            { kana: "た", name: "たんす", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "た", name: "ダンボール", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "た", name: "チャイルドシート", cat: "破砕ごみ", note: "" },
+            { kana: "た", name: "茶碗", cat: "破砕ごみ", note: "" },
+            { kana: "た", name: "注射針、注射器(在宅治療用)", cat: "市では収集しません", note: "医療機関などへ返却する" },
+            { kana: "た", name: "調味料びん", cat: "資源物(びん)", note: "中身を使い切り、キャップを取り軽く水洗いする" },
+            { kana: "た", name: "机", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "た", name: "土", cat: "破砕ごみ", note: "土のう袋に入れて片手で持てる量を2袋程度。多量の場合は生活環境課に相談", facilityId: "seikatsu_kankyo" },
+            { kana: "た", name: "つっぱり棒", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "た", name: "釣竿", cat: "破砕ごみ", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "た", name: "テーブル", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "た", name: "ティッシュの外箱", cat: "資源物(紙類)", note: "開いて十字にひもでしばる。ビニール部分を外す" },
+            { kana: "た", name: "テレビ", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "た", name: "テレビ台", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "た", name: "電気カーペット・ホットカーペット", cat: "資源物(小型家電)", note: "小さくたたんで、ひもでしばる(1m以下)" },
+            { kana: "た", name: "電気ストーブ", cat: "資源物(小型家電)", note: "" },
+            { kana: "た", name: "電気ポット", cat: "資源物(小型家電)", note: "" },
+            { kana: "た", name: "電気毛布", cat: "資源物(小型家電)", note: "「電気毛布」と表示する" },
+            { kana: "た", name: "電球(LEDを含む)", cat: "資源物(蛍光管)", note: "割れないように保護カバーなどに入れる" },
+            { kana: "た", name: "電子レンジ", cat: "資源物(小型家電)", note: "" },
+            { kana: "た", name: "電線・電気コード", cat: "資源物(金属類)", note: "まとめてしばる。ACアダプターなどは外さなくてよい" },
+            { kana: "た", name: "電話機", cat: "資源物(小型家電)", note: "電池を抜く" },
+            { kana: "た", name: "トースター", cat: "資源物(小型家電)", note: "" },
+            { kana: "た", name: "陶磁器類", cat: "破砕ごみ", note: "" },
+            { kana: "た", name: "時計", cat: "資源物(小型家電)", note: "電池が外せるものは外す" },
+            { kana: "た", name: "トタン(金属製)", cat: "資源物(金属類)", note: "1m超は集積場不可。多量はクリーンセンターもしくは楠衛生センターへ", facilityId: "kusu_center" },
+            { kana: "た", name: "ドライヤー", cat: "資源物(小型家電)", note: "" },
+            { kana: "た", name: "塗料・ペンキ", cat: "市では収集しません", note: "販売店などに問い合わせてください。少量の場合は紙や古布などに染み込ませ可燃ごみ" },
+            // な行
+            { kana: "な", name: "ナイフ", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "な", name: "長靴", cat: "可燃ごみ", note: "" },
+            { kana: "な", name: "鍋(金属製、ホーロー製)", cat: "資源物(金属類)", note: "陶磁器製、耐熱ガラス製のものは破砕ごみ" },
+            { kana: "な", name: "生ごみ", cat: "可燃ごみ", note: "水分をよく切る" },
+            { kana: "な", name: "ぬいぐるみ", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "な", name: "布・布類", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない。汚れのひどいものは可燃ごみ" },
+            { kana: "な", name: "ネジ", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "な", name: "ノート", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "な", name: "ノートパソコン", cat: "資源物(小型家電)", note: "個人情報など削除したうえで出す。PCリサイクルも活用" },
+            { kana: "な", name: "のこぎり", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            // は行
+            { kana: "は", name: "パイプ椅子(いす)", cat: "資源物(金属類)", note: "折りたたみ式でないものは粗大ごみ戸別有料収集指定品目" },
+            { kana: "は", name: "パイプベッド", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "は", name: "バケツ(プラスチック製)", cat: "破砕ごみ", note: "50cm以下のものは可燃ごみ。金属製のものは資源物(金属類)" },
+            { kana: "は", name: "ハサミ(金属製)", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "は", name: "パソコン(家庭用)", cat: "資源物(小型家電)", note: "個人情報など削除したうえで出す。PCリサイクルも活用" },
+            { kana: "は", name: "バッテリー(車・バイク・自転車用)", cat: "資源物(金属類)", note: "オートバイ、原付自転車、アシスト自転車用のバッテリーは資源物(乾電池・水銀体温計)" },
+            { kana: "は", name: "発泡スチロール", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "は", name: "刃物", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "は", name: "針", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "は", name: "ハンガー(針金)", cat: "資源物(金属類)", note: "プラスチック製のものは可燃ごみ" },
+            { kana: "は", name: "びん(化粧品用を除く)", cat: "資源物(びん)", note: "中身を空にして軽く水洗いする" },
+            { kana: "は", name: "びん(化粧品用)", cat: "破砕ごみ", note: "" },
+            { kana: "は", name: "ファンヒーター", cat: "資源物(小型家電)", note: "灯油を必ず抜く" },
+            { kana: "は", name: "ふとん", cat: "破砕ごみ", note: "小さくたたんで、ひもでしばる(1m以下)" },
+            { kana: "は", name: "フライパン", cat: "資源物(金属類)", note: "" },
+            { kana: "は", name: "プラスチック容器・ボトル", cat: "可燃ごみ", note: "ペットボトルは除く。中身を空にして軽く水洗いする" },
+            { kana: "は", name: "プリンター", cat: "資源物(小型家電)", note: "インクカートリッジなどは販売店や地区市民センターの回収箱などもご利用ください", facilityId: "civic_shimin_madoguchi" },
+            { kana: "は", name: "ブルーシート", cat: "破砕ごみ", note: "50cm以下のものは可燃ごみ。小さくたたんで、ひもでしばる(1m以下)" },
+            { kana: "は", name: "古着・古布", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない" },
+            { kana: "は", name: "ベッド", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "は", name: "ペットボトル", cat: "ペットボトル", note: "キャップ、ラベルを取り、水洗いする" },
+            { kana: "は", name: "ペットボトルのキャップ、ラベル", cat: "可燃ごみ", note: "" },
+            { kana: "は", name: "ヘッドホン", cat: "資源物(小型家電)", note: "" },
+            { kana: "は", name: "ベビーカー", cat: "破砕ごみ", note: "" },
+            { kana: "は", name: "ヘルメット", cat: "破砕ごみ", note: "" },
+            { kana: "は", name: "便座(ウォシュレット等)", cat: "破砕ごみ", note: "便座カバーは可燃ごみ。電動のものは資源物(小型家電)" },
+            { kana: "は", name: "弁当箱(プラスチック製)", cat: "可燃ごみ", note: "金属製のものは資源物(金属類)" },
+            { kana: "は", name: "ホース", cat: "可燃ごみ", note: "50cm以下に切断する" },
+            { kana: "は", name: "包丁(金属製)", cat: "資源物(金属類)", note: "刃の部分を厚紙や段ボールなどで包み、「刃物危険」と表示する" },
+            { kana: "は", name: "ボタン電池", cat: "資源物(乾電池・水銀体温計)", note: "販売店などに設置されている回収箱も利用する(ビニールテープなどで絶縁する)" },
+            { kana: "は", name: "ホッチキスの針", cat: "資源物(金属類)", note: "ふた付きの缶に入れる" },
+            { kana: "は", name: "ホットプレート", cat: "資源物(小型家電)", note: "" },
+            { kana: "は", name: "ポリタンク", cat: "破砕ごみ", note: "" },
+            { kana: "は", name: "本・書籍", cat: "資源物(紙類)", note: "十字にひもでしばる" },
+            { kana: "は", name: "本棚", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            // ま行
+            { kana: "ま", name: "マイク・マウス(パソコン用)", cat: "資源物(小型家電)", note: "" },
+            { kana: "ま", name: "まくら", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "ま", name: "マット(玄関・キッチン・風呂等)", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "ま", name: "マットレス", cat: "破砕ごみ", note: "たたんでひもでしばる(1m以下)。スプリングマットレスは粗大ごみ指定品目" },
+            { kana: "ま", name: "まな板", cat: "可燃ごみ", note: "50cmを超えるものは破砕ごみ" },
+            { kana: "ま", name: "魔法瓶", cat: "資源物(金属類)", note: "プラスチック製のものは可燃ごみ" },
+            { kana: "ま", name: "ミキサー", cat: "資源物(小型家電)", note: "" },
+            { kana: "ま", name: "ミシン(ポータブル)", cat: "資源物(小型家電)", note: "足踏み式は資源物(金属類)、木製の台は外して粗大ごみ" },
+            { kana: "ま", name: "めがね(金属製)", cat: "資源物(金属類)", note: "" },
+            { kana: "ま", name: "毛布", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない。電気毛布は小型家電" },
+            { kana: "ま", name: "モニター(パソコン用)", cat: "資源物(小型家電)", note: "" },
+            { kana: "ま", name: "物干し竿(金属製)", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません。プラスチック製は破砕ごみ", facilityId: "clean_center" },
+            { kana: "ま", name: "物干し台(コンクリート製の土台)", cat: "破砕ごみ", note: "金属製の支柱は資源物(金属類)" },
+            { kana: "ま", name: "モバイルバッテリー", cat: "資源物(乾電池・水銀体温計)", note: "" },
+            // や行
+            { kana: "や", name: "やかん", cat: "資源物(金属類)", note: "" },
+            { kana: "や", name: "野菜くず", cat: "可燃ごみ", note: "水分をよく切る" },
+            { kana: "や", name: "浴衣", cat: "資源物(布・衣類)", note: "まとめて透明または半透明の袋に入れる。雨の日は出さない" },
+            { kana: "や", name: "浴槽", cat: "市では収集しません", note: "直接四日市市クリーンセンターへ持ち込む。業者の工事に伴うものは持ち込めません", facilityId: "clean_center" },
+            { kana: "や", name: "よしず", cat: "破砕ごみ", note: "1m超は集積場不可。50cm以下に切断すれば可燃ごみ", facilityId: "clean_center" },
+            // ら・わ行
+            { kana: "ら", name: "ライター", cat: "資源物(ライター)", note: "必ず使い切り、ガスを抜く" },
+            { kana: "ら", name: "ラグマット", cat: "破砕ごみ", note: "" },
+            { kana: "ら", name: "ラケット", cat: "破砕ごみ", note: "" },
+            { kana: "ら", name: "ラジオ、ラジカセ", cat: "資源物(小型家電)", note: "" },
+            { kana: "ら", name: "ランドセル", cat: "可燃ごみ", note: "" },
+            { kana: "ら", name: "リモコン", cat: "資源物(小型家電)", note: "電池を抜く" },
+            { kana: "ら", name: "リヤカー", cat: "市では収集しません", note: "資源物(金属類)として四日市市クリーンセンターもしくは楠衛生センターへ持ち込む", facilityId: "clean_center" },
+            { kana: "ら", name: "リュックサック", cat: "可燃ごみ", note: "" },
+            { kana: "ら", name: "ルームランナー", cat: "粗大ごみ指定品目", note: "粗大ごみ戸別有料収集指定品目" },
+            { kana: "ら", name: "冷蔵庫・冷凍庫", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "ら", name: "レジ袋", cat: "可燃ごみ", note: "" },
+            { kana: "ら", name: "れんが", cat: "破砕ごみ", note: "土のう袋に入れて片手で持てる量を2袋程度。多量の場合は生活環境課に相談", facilityId: "seikatsu_kankyo" },
+            { kana: "ら", name: "ロープ", cat: "可燃ごみ", note: "50cm以下に切断する" },
+            { kana: "ら", name: "ロッカー(金属製)", cat: "資源物(金属類)", note: "1mを超えるものは原形のままでは集積場に出せません", facilityId: "clean_center" },
+            { kana: "わ", name: "ワインセラー", cat: "市では収集しません", note: "家電リサイクル法対象品目" },
+            { kana: "わ", name: "割りばし、割りばしの袋", cat: "可燃ごみ", note: "" }
+          ]
+        },
+
+        // ▼ 登録済み自治体 2: 三重県桑名市（令和8年度 資源物、ごみの分け方・出し方準拠）
+        "桑名市": {
+          id: "kuwana",
+          prefecture: "三重県",
+          municipality: "桑名市",
+          fullTitle: "三重県桑名市",
+          shortName: "桑名",
+          userAddress: "桑名駅・桑名市役所周辺",
+          centerLat: 35.0622,
+          centerLng: 136.6837,
+          isOfficialData: true,
+          categories: [
+            "可燃ごみ", "プラスチック製容器包装", "不燃ごみ", "有害ごみ",
+            "資源物(紙類・布類)", "資源物(スプレー缶・カセットガスボンベ)",
+            "資源物(ペットボトル)", "資源物(缶・ビン)", "使用済小型家電回収",
+            "粗大ごみ", "市で収集していないもの"
+          ],
+          rulesSummary: [
+            { title: "50cm以下ルール（可燃ごみ・小型家電コード）", color: "amber", icon: "fa-ruler", text: "落葉・木くず・草など庭木の剪定ごみは直径5cm以下・長さ50cmまで。大きいプラスチック製品は50cm以下に切ってください。小型家電のコードも50cm以下に切ります。" },
+            { title: "プラスチック製容器包装（プラマーク）", color: "blue", icon: "fa-recycle", text: "プラマーク表示のある容器包装は中身を空にして水洗い（汚れの取れないものは可燃ごみ）。キャップ・フタ・紙ラベルは取り外し、二重袋にしないでください。" },
+            { title: "スプレー缶・有害ごみの厳守ルール", color: "red", icon: "fa-triangle-exclamation", text: "スプレー缶・カセットガスボンベは中身を使い切り、絶対に穴を開けずに専用フレコンへ。乾電池・水銀温度計・蛍光管は無料の「有害ごみ袋」へ（白熱電球・LED電球は不燃ごみ）。" },
+            { title: "傘・LED管の特例と小型家電回収BOX", color: "emerald", icon: "fa-shirt", text: "不燃ごみは「傘・LED管」のみ袋から出ていてもかまいません（傘布は外して可燃ごみ）。指定29品目の小型家電（投入口 縦15cm×横25cm以内）は回収BOXへ。" }
+          ],
+          aiPromptRules: `
+【桑名市特有の重要ルール（令和8年度版）】
+1. 可燃ごみ: 生ごみ（水切り）、天ぷら油（布・紙に染み込ませるか凝固剤）、保冷剤、ぬいぐるみ、剪定ごみ（直径5cm以下・長さ50cmまで）、紙おむつ、市販ペット用砂、革・ゴム製品、プラマークのないプラスチック製品（50cm以下に切る。CD・DVD・ビデオテープ・カセットテープ・インクリボンも可燃ごみ）。
+2. プラスチック製容器包装: プラマーク表示のあるトレイ、うがい薬・目薬容器、レジ袋、プラ製フタ、食品ラップ・外装フィルム、卵パック、発泡スチロール等。中身を空にして水洗い。汚れの取れないものは可燃ごみ。二重袋禁止。
+3. 不燃ごみ: ライター（中身使い切り）、小型家電製品（電池を外し、コードは50cm以下に切る）、金属製品、白熱電球・LED電球、使い捨てカイロ、アルミホイル、ポリタンク、鏡、針・刃物（紙に包む）、陶磁器・ガラス製品（割れたものは紙に包む）、傘の骨組（傘布は可燃ごみ）。※「傘・LED管」のみ袋から出ていてもOK。
+4. 有害ごみ: 乾電池、水銀温度計、蛍光管（直管・丸管・電球型蛍光ランプ）。市役所や地区市民センター等で無料配布の「有害ごみ袋」に入れる。ボタン電池は両端子を絶縁して回収協力店へ。
+5. 資源物（指定袋なし・フレコンへ）: 紙類（新聞・段ボール・雑がみ・飲料用紙パック ※内側銀色は可燃ごみ）、布類（古着・毛布・シーツ・タオル・カーテン ※布団は粗大ごみ）、スプレー缶・カセットガスボンベ（中身使い切り・穴開け厳禁）、ペットボトル（キャップ・ラベルはプラ容器包装へ）、缶（つぶさずに出す・7cm未満のフタは不燃ごみ）、ビン（化粧品のビンは不燃ごみ）。
+6. 使用済小型家電回収BOX: 指定29品目（縦15cm×横25cm以内）は市役所1階北玄関・地区市民センター・清掃センターの回収BOXへ。
+          `,
+          facilities: [
+            {
+              id: "kuwana_shiyakusho",
+              type: "office",
+              typeLabel: "市役所窓口・回収拠点",
+              name: "桑名市役所（環境対策課・1階北玄関回収BOX）",
+              address: "三重県桑名市中央町二丁目37番地",
+              lat: 35.0622,
+              lng: 136.6837,
+              hours: "9:00〜16:30（閉庁日を除く）",
+              phone: "0594-24-1436",
+              targets: "有害ごみ袋無料配布、中身が残ったスプレー缶持ち込み（地下1階環境対策課）、使用済小型家電回収BOX（1階北玄関）",
+              note: "中身が残っているスプレー缶・カセットガスボンベは地下1階環境対策課窓口へお持ち込みください。",
+              color: "#7c3aed"
+            },
+            {
+              id: "kuwana_clean_center",
+              type: "center",
+              typeLabel: "清掃センター・回収拠点",
+              name: "桑名市清掃センター",
+              address: "三重県桑名市大字芳ヶ崎",
+              lat: 35.0755,
+              lng: 136.6521,
+              hours: "9:00〜16:30",
+              phone: "0594-22-5183",
+              targets: "ごみの直接持ち込み、有害ごみ袋無料配布、使用済小型家電回収BOX、中身入りスプレー缶持ち込み",
+              note: "直接持ち込みや受付時間の詳細は環境対策課・清掃センターへご確認ください。",
+              color: "#059669"
+            },
+            {
+              id: "kuwana_oyamada",
+              type: "civic",
+              typeLabel: "地区市民センター",
+              name: "大山田地区市民センター",
+              address: "三重県桑名市大山田一丁目7番地4",
+              lat: 35.0608,
+              lng: 136.6578,
+              hours: "9:00〜16:30",
+              phone: "0594-31-8221",
+              targets: "有害ごみ袋無料配布、使用済小型家電回収BOX（指定29品目・縦15cm×横25cm以内）",
+              note: "使用済小型家電の回収ボックスは指定29品目・投入口サイズ制限があります。",
+              color: "#2563eb"
+            },
+            {
+              id: "kuwana_tado",
+              type: "civic",
+              typeLabel: "地区市民センター",
+              name: "多度地区市民センター",
+              address: "三重県桑名市多度町多度二丁目1-1",
+              lat: 35.1318,
+              lng: 136.6322,
+              hours: "9:00〜16:30",
+              phone: "0594-48-2000",
+              targets: "有害ごみ袋無料配布、使用済小型家電回収BOX、中身が残ったスプレー缶・カセットガスボンベ回収ボックス",
+              note: "中身が残っているスプレー缶の回収ボックスも設置されています。",
+              color: "#2563eb"
+            },
+            {
+              id: "kuwana_nagashima",
+              type: "civic",
+              typeLabel: "地区市民センター",
+              name: "長島地区市民センター",
+              address: "三重県桑名市長島町松ヶ島38",
+              lat: 35.0981,
+              lng: 136.6975,
+              hours: "9:00〜16:30",
+              phone: "0594-42-1001",
+              targets: "有害ごみ袋無料配布、使用済小型家電回収BOX、中身が残ったスプレー缶・カセットガスボンベ回収ボックス",
+              note: "中身が残っているスプレー缶の回収ボックスも設置されています。",
+              color: "#2563eb"
+            }
+          ],
+          items: [
+            { kana: "あ", name: "ICレコーダー", cat: "使用済小型家電回収", note: "縦15cm×横25cm以内の指定29品目。回収BOXまたは不燃ごみへ", facilityId: "kuwana_shiyakusho" },
+            { kana: "あ", name: "アルミ缶", cat: "資源物(缶・ビン)", note: "中身を空にして水洗い。つぶさずに出す。7cm未満のフタは不燃ごみ" },
+            { kana: "あ", name: "アルミホイル", cat: "不燃ごみ", note: "" },
+            { kana: "あ", name: "イヤホン・ヘッドフォン", cat: "使用済小型家電回収", note: "回収BOXへ", facilityId: "kuwana_shiyakusho" },
+            { kana: "あ", name: "飲料用紙パック", cat: "資源物(紙類・布類)", note: "内側が銀色の紙パックは可燃ごみ" },
+            { kana: "え", name: "LED電球・白熱電球", cat: "不燃ごみ", note: "LED管のみ袋から出ていてもかまいません" },
+            { kana: "か", name: "傘", cat: "不燃ごみ", note: "傘布は取り外して「可燃ごみ」へ。傘の骨組は袋から出ていても可" },
+            { kana: "か", name: "カセットテープ・ビデオテープ", cat: "可燃ごみ", note: "令和4年4月から可燃ごみになりました" },
+            { kana: "か", name: "カセットガスボンベ・スプレー缶", cat: "資源物(スプレー缶・カセットガスボンベ)", note: "中身を使い切り、穴を開けずに専用フレコンへ。中身が残っている場合は窓口・専用BOXへ持ち込み", facilityId: "kuwana_shiyakusho" },
+            { kana: "か", name: "紙おむつ", cat: "可燃ごみ", note: "汚物は取り除き、トイレに流す" },
+            { kana: "か", name: "ガラス製品・鏡・陶磁器", cat: "不燃ごみ", note: "割れたものは紙に包んでごみ袋へ" },
+            { kana: "か", name: "乾電池", cat: "有害ごみ", note: "無料の「有害ごみ袋」へ。ボタン電池は両端子を粘着テープで絶縁し回収協力店へ", facilityId: "kuwana_shiyakusho" },
+            { kana: "け", name: "蛍光管（直管・丸管・電球型蛍光ランプ）", cat: "有害ごみ", note: "無料の「有害ごみ袋」へ。白熱電球・LED電球は不燃ごみ", facilityId: "kuwana_shiyakusho" },
+            { kana: "け", name: "携帯電話・スマートフォン・タブレット", cat: "使用済小型家電回収", note: "回収BOXへ（縦15cm×横25cm以内）", facilityId: "kuwana_shiyakusho" },
+            { kana: "け", name: "化粧品のビン", cat: "不燃ごみ", note: "飲料・調味料などのビンは資源物(缶・ビン)" },
+            { kana: "こ", name: "小型家電製品（アイロン・コード類等）", cat: "不燃ごみ", note: "電池は取り外して「有害ごみ」へ。コードは50cm以下に切る" },
+            { kana: "し", name: "新聞・段ボール・雑がみ", cat: "資源物(紙類・布類)", note: "指定袋なし・フレコンへ。感熱紙・写真・シュレッダー古紙等は雑がみ不可（可燃ごみ）" },
+            { kana: "す", name: "水銀温度計", cat: "有害ごみ", note: "無料の「有害ごみ袋」へ", facilityId: "kuwana_shiyakusho" },
+            { kana: "せ", name: "剪定ごみ（落葉・木くず・草）", cat: "可燃ごみ", note: "直径5cm以下、長さ50cmまで。土を落として乾燥させる" },
+            { kana: "て", name: "天ぷら油", cat: "可燃ごみ", note: "布や紙にしみこませるか、凝固剤で固める" },
+            { kana: "て", name: "テレビ・エアコン・冷蔵庫・洗濯機・衣類乾燥機", cat: "市で収集していないもの", note: "家電リサイクル法対象品目。購入店または指定引取場所（朝日金属・日本通運四日市）へ" },
+            { kana: "と", name: "トレイ・レジ袋・卵パック（プラマーク表示）", cat: "プラスチック製容器包装", note: "中身を空にして水洗い。汚れの取れないものは可燃ごみ。二重袋禁止" },
+            { kana: "な", name: "生ごみ", cat: "可燃ごみ", note: "水を切ってごみ袋へ" },
+            { kana: "ぬ", name: "ぬいぐるみ", cat: "可燃ごみ", note: "" },
+            { kana: "は", name: "パソコン（家庭用）", cat: "市で収集していないもの", note: "PCリサイクル窓口または連携事業者リネットジャパン（宅配回収無料）を利用" },
+            { kana: "は", name: "刃物・針", cat: "不燃ごみ", note: "紙に包んでごみ袋へ" },
+            { kana: "ひ", name: "ビン（透明・茶色・その他の色）", cat: "資源物(缶・ビン)", note: "中身を空にして水洗い。汚れの取れないもの・化粧品のビンは不燃ごみ" },
+            { kana: "ふ", name: "布団", cat: "粗大ごみ", note: "古着・毛布・シーツ・タオル・カーテンは資源物(布類)" },
+            { kana: "ふ", name: "プラスチック製品（プラマークなし）", cat: "可燃ごみ", note: "おもちゃ・まな板・バケツ・ハンガー・CD/DVD等。大きいものは50cm以下に切る" },
+            { kana: "へ", name: "ペットボトル", cat: "資源物(ペットボトル)", note: "中身を空にして水洗い。キャップ・ラベルは「プラスチック製容器包装」へ" },
+            { kana: "ほ", name: "保冷剤", cat: "可燃ごみ", note: "" },
+            { kana: "ほ", name: "ポリタンク", cat: "不燃ごみ", note: "" },
+            { kana: "も", name: "モバイルバッテリー", cat: "使用済小型家電回収", note: "膨張した電池は回収BOXに入れないでください（桑名市HP参照）", facilityId: "kuwana_shiyakusho" },
+            { kana: "ら", name: "ライター", cat: "不燃ごみ", note: "中身を全て使い切る" }
+          ]
+        }
+      },
+
+      // -----------------------------------------------------------------------
+      // 【近畿地方】
+      // -----------------------------------------------------------------------
+      "滋賀県": {
+        // 例: "大津市": { ... } をここに追加
+      },
+      "京都府": {
+        // 例: "京都市": { ... } をここに追加
+      },
+      "大阪府": {
+        // 例: "大阪市": { ... }, "堺市": { ... } をここに追加
+      },
+      "兵庫県": {
+        // 例: "神戸市": { ... } をここに追加
+      },
+      "奈良県": {
+        // 例: "奈良市": { ... } をここに追加
+      },
+      "和歌山県": {
+        // 例: "和歌山市": { ... } をここに追加
+      },
+
+      // -----------------------------------------------------------------------
+      // 【中国地方】
+      // -----------------------------------------------------------------------
+      "鳥取県": {
+        // 例: "鳥取市": { ... } をここに追加
+      },
+      "島根県": {
+        // 例: "松江市": { ... } をここに追加
+      },
+      "岡山県": {
+        // 例: "岡山市": { ... } をここに追加
+      },
+      "広島県": {
+        // 例: "広島市": { ... } をここに追加
+      },
+      "山口県": {
+        // 例: "山口市": { ... } をここに追加
+      },
+
+      // -----------------------------------------------------------------------
+      // 【四国地方】
+      // -----------------------------------------------------------------------
+      "徳島県": {
+        // 例: "徳島市": { ... } をここに追加
+      },
+      "香川県": {
+        // 例: "高松市": { ... } をここに追加
+      },
+      "愛媛県": {
+        // 例: "松山市": { ... } をここに追加
+      },
+      "高知県": {
+        // 例: "高知市": { ... } をここに追加
+      },
+
+      // -----------------------------------------------------------------------
+      // 【九州・沖縄地方】
+      // -----------------------------------------------------------------------
+      "福岡県": {
+        // 例: "福岡市": { ... }, "北九州市": { ... } をここに追加
+      },
+      "佐賀県": {
+        // 例: "佐賀市": { ... } をここに追加
+      },
+      "長崎県": {
+        // 例: "長崎市": { ... } をここに追加
+      },
+      "熊本県": {
+        // 例: "熊本市": { ... } をここに追加
+      },
+      "大分県": {
+        // 例: "大分市": { ... } をここに追加
+      },
+      "宮崎県": {
+        // 例: "宮崎市": { ... } をここに追加
+      },
+      "鹿児島県": {
+        // 例: "鹿児島市": { ... } をここに追加
+      },
+      "沖縄県": {
+        // 例: "那覇市": { ... } をここに追加
+      }
+    };
+
+    // デフォルト自治体設定（三重県四日市市）
+    const DEFAULT_YOKKAICHI_CONFIG = NATIONAL_MUNICIPALITY_DB["三重県"]["四日市市"];
+
+    // データベース検索用ヘルパー関数
+    function findMunicipalityInNationalDB(queryText) {
+      if (!queryText) return null;
+      const normalized = queryText.replace(/\s+/g, "");
+      for (const pref of Object.keys(NATIONAL_MUNICIPALITY_DB)) {
+        const munis = NATIONAL_MUNICIPALITY_DB[pref] || {};
+        for (const muniName of Object.keys(munis)) {
+          const shortBase = muniName.replace(/[市区町村]$/, "");
+          if (normalized.includes(muniName) || (shortBase.length >= 2 && normalized.includes(shortBase))) {
+            return JSON.parse(JSON.stringify(munis[muniName]));
+          }
+        }
+      }
+      return null;
+    }
+
+    function getRegisteredMunicipalityCount() {
+      let count = 0;
+      for (const pref of Object.keys(NATIONAL_MUNICIPALITY_DB)) {
+        count += Object.keys(NATIONAL_MUNICIPALITY_DB[pref] || {}).length;
+      }
+      return count;
+    }
+
+    // =========================================================================
+    // 2. 分別区分ごとのカラー・アイコンスタイル定義
+    // =========================================================================
+    function getCategoryStyle(category) {
+      const cat = category || "";
+      if (cat.includes("可燃") || cat.includes("燃やす")) {
+        return { bg: "bg-rose-600", border: "border-rose-300", icon: "fa-fire" };
+      }
+      if (cat.includes("プラスチック") || cat.includes("プラ")) {
+        return { bg: "bg-fuchsia-600", border: "border-fuchsia-300", icon: "fa-box-open" };
+      }
+      if (cat.includes("有害")) {
+        return { bg: "bg-yellow-600", border: "border-yellow-300", icon: "fa-triangle-exclamation" };
+      }
+      if (cat.includes("破砕") || cat.includes("不燃") || cat.includes("燃やさない")) {
+        return { bg: "bg-slate-700", border: "border-slate-300", icon: "fa-hammer" };
+      }
+      if (cat.includes("小型家電")) {
+        return { bg: "bg-indigo-600", border: "border-indigo-300", icon: "fa-plug" };
+      }
+      if (cat.includes("金属")) {
+        return { bg: "bg-cyan-700", border: "border-cyan-300", icon: "fa-screwdriver-wrench" };
+      }
+      if (cat.includes("紙")) {
+        return { bg: "bg-amber-600", border: "border-amber-300", icon: "fa-newspaper" };
+      }
+      if (cat.includes("布") || cat.includes("衣類")) {
+        return { bg: "bg-pink-600", border: "border-pink-300", icon: "fa-shirt" };
+      }
+      if (cat.includes("ペットボトル")) {
+        return { bg: "bg-sky-600", border: "border-sky-300", icon: "fa-bottle-water" };
+      }
+      if (cat.includes("びん") || cat.includes("ビン") || cat.includes("缶") || cat.includes("スプレー") || cat.includes("蛍光管") || cat.includes("乾電池") || cat.includes("ライター") || cat.includes("資源")) {
+        return { bg: "bg-emerald-600", border: "border-emerald-300", icon: "fa-recycle" };
+      }
+      if (cat.includes("粗大")) {
+        return { bg: "bg-orange-600", border: "border-orange-300", icon: "fa-couch" };
+      }
+      if (cat.includes("収集しません") || cat.includes("収集していない") || cat.includes("不可")) {
+        return { bg: "bg-red-800", border: "border-red-300", icon: "fa-ban" };
+      }
+      return { bg: "bg-teal-600", border: "border-teal-300", icon: "fa-trash-can" };
+    }
+
+    // =========================================================================
+    // 3. 状態管理変数
+    // =========================================================================
+    let activeMunicipality = JSON.parse(JSON.stringify(DEFAULT_YOKKAICHI_CONFIG));
+    let videoStream = null;
+
+    // マップ関連状態 (Google Maps API & Leaflet フォールバック)
+    let googleMap = null;
+    let googleRoutePolyline = null;
+    let googleInfoWindow = null;
+    let googleFacilityMarkers = {};
+    let googleOriginMarker = null;
+
+    let useLeafletFallback = false;
+    let leafletMap = null;
+    let facilityMarkers = {};
+    let originMarker = null;
+    let routePolyline = null;
+
+    let currentOriginCoords = { lat: 34.9675, lng: 136.6185, label: "登録住所（近鉄四日市駅周辺）" };
+    let selectedFacilityId = "clean_center";
+    let currentMapFacilityFilter = "ALL";
+
+    let localMobileNetModel = null;
+    let currentFacingMode = "environment";
+    let currentImageBase64 = null;
+    let currentImageMimeType = "image/jpeg";
+    let currentAIResult = null;
+    let judgmentHistory = [];
+    let currentDictCategory = "ALL";
+    let currentDictKana = "ALL";
+
+    // =========================================================================
+    // 4. タブ切り替え・モーダル・全国47都道府県＆自治体登録ロジック
+    // =========================================================================
+    function switchTab(tabName) {
+      const tabs = ['camera', 'search', 'map', 'history'];
+      tabs.forEach(t => {
+        const view = document.getElementById(`view-${t}`);
+        const btn = document.getElementById(`tab-${t}`);
+        if (t === tabName) {
+          view.classList.remove('hidden');
+          btn.classList.remove('border-transparent', 'text-emerald-100');
+          btn.classList.add('border-white', 'text-white');
+        } else {
+          view.classList.add('hidden');
+          btn.classList.remove('border-white', 'text-white');
+          btn.classList.add('border-transparent', 'text-emerald-100');
+        }
+      });
+
+      if (tabName !== 'camera') {
+        stopCamera();
+      }
+      if (tabName === 'search') {
+        filterDictionary();
+      }
+      if (tabName === 'map') {
+        initOrUpdateMap();
+      }
+      if (tabName === 'history') {
+        renderHistory();
+      }
+    }
+
+    function openRuleModal() {
+      renderRuleModalContent();
+      document.getElementById('rule-modal').classList.remove('hidden');
+    }
+
+    function closeRuleModal() {
+      document.getElementById('rule-modal').classList.add('hidden');
+    }
+
+    function renderRuleModalContent() {
+      const titleEl = document.getElementById('rule-modal-title');
+      const bodyEl = document.getElementById('rule-modal-body');
+      titleEl.innerHTML = `<i class="fa-solid fa-book-open"></i><span>${escapeHtml(activeMunicipality.municipality)} ごみ分別の重要ルール</span>`;
+
+      const colorMap = {
+        amber: { bg: "bg-amber-50", border: "border-amber-500", title: "text-amber-900", text: "text-amber-800" },
+        blue: { bg: "bg-blue-50", border: "border-blue-500", title: "text-blue-900", text: "text-blue-800" },
+        red: { bg: "bg-red-50", border: "border-red-500", title: "text-red-900", text: "text-red-800" },
+        emerald: { bg: "bg-emerald-50", border: "border-emerald-500", title: "text-emerald-900", text: "text-emerald-800" }
+      };
+
+      const rulesHtml = (activeMunicipality.rulesSummary || []).map(r => {
+        const c = colorMap[r.color] || colorMap.emerald;
+        return `
+          <div class="${c.bg} border-l-4 ${c.border} p-3.5 rounded-r-xl">
+            <h4 class="font-bold ${c.title} flex items-center gap-1.5">
+              <i class="fa-solid ${r.icon || 'fa-circle-info'}"></i> ${escapeHtml(r.title)}
+            </h4>
+            <p class="text-xs sm:text-sm ${c.text} mt-1">${escapeHtml(r.text)}</p>
+          </div>
+        `;
+      }).join('');
+
+      bodyEl.innerHTML = `
+        ${rulesHtml}
+        <p class="text-xs text-slate-500">
+          ※ ${escapeHtml(activeMunicipality.fullTitle)}の家庭ごみルールに基づいています。事業活動で出たごみは集積場に出せません。
+        </p>
+      `;
+    }
+
+    // 47都道府県プルダウンの初期化
+    function initPrefectureSelector(defaultPref = "三重県", defaultMuni = "四日市市") {
+      const prefSelect = document.getElementById('prefecture-select');
+      if (!prefSelect) return;
+
+      prefSelect.innerHTML = PREFECTURE_REGIONS.map(group => {
+        const options = group.prefs.map(p => {
+          const munis = Object.keys(NATIONAL_MUNICIPALITY_DB[p] || {});
+          const countLabel = munis.length > 0 ? `（${munis.length}自治体登録済）` : `（データ未登録）`;
+          return `<option value="${escapeHtml(p)}">${escapeHtml(p)} ${countLabel}</option>`;
+        }).join('');
+        return `<optgroup label="${escapeHtml(group.region)}">${options}</optgroup>`;
+      }).join('');
+
+      if (NATIONAL_MUNICIPALITY_DB[defaultPref]) {
+        prefSelect.value = defaultPref;
+      }
+      onPrefectureSelectChange(defaultMuni);
+    }
+
+    function onPrefectureSelectChange(preferredMuni = "") {
+      const prefSelect = document.getElementById('prefecture-select');
+      const muniSelect = document.getElementById('municipality-select');
+      const noticeEl = document.getElementById('pref-slot-notice');
+      const applyBtn = document.getElementById('apply-db-muni-btn');
+      if (!prefSelect || !muniSelect) return;
+
+      const selectedPref = prefSelect.value;
+      const munisObj = NATIONAL_MUNICIPALITY_DB[selectedPref] || {};
+      const muniNames = Object.keys(munisObj);
+
+      if (muniNames.length === 0) {
+        muniSelect.innerHTML = `<option value="">-- データ未登録（スロット空） --</option>`;
+        muniSelect.disabled = true;
+        applyBtn.disabled = true;
+        applyBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        if (noticeEl) {
+          noticeEl.innerHTML = `<i class="fa-solid fa-circle-info text-amber-500 mr-1"></i><strong>${escapeHtml(selectedPref)}</strong>のデータベース枠は空です。コード内の <code>NATIONAL_MUNICIPALITY_DB["${escapeHtml(selectedPref)}"]</code> に自治体データを追加するか、下の「住所入力」から検索してください。`;
+        }
+      } else {
+        muniSelect.disabled = false;
+        applyBtn.disabled = false;
+        applyBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        muniSelect.innerHTML = muniNames.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+        if (preferredMuni && munisObj[preferredMuni]) {
+          muniSelect.value = preferredMuni;
+        }
+        if (noticeEl) {
+          noticeEl.innerHTML = `<i class="fa-solid fa-check-circle text-emerald-600 mr-1"></i><strong>${escapeHtml(selectedPref)}</strong>には <strong>${muniNames.length}件</strong>（${escapeHtml(muniNames.join('・'))}）の公式データが登録されています。`;
+        }
+      }
+    }
+
+    function applySelectedDbMunicipality() {
+      const pref = document.getElementById('prefecture-select')?.value;
+      const muni = document.getElementById('municipality-select')?.value;
+      if (!pref || !muni || !NATIONAL_MUNICIPALITY_DB[pref]?.[muni]) return;
+
+      activeMunicipality = JSON.parse(JSON.stringify(NATIONAL_MUNICIPALITY_DB[pref][muni]));
+      saveMunicipalityToStorage();
+      applyMunicipalityConfig();
+      closeMunicipalityModal();
+    }
+
+    function selectQuickMunicipality(pref, muni) {
+      if (NATIONAL_MUNICIPALITY_DB[pref]?.[muni]) {
+        activeMunicipality = JSON.parse(JSON.stringify(NATIONAL_MUNICIPALITY_DB[pref][muni]));
+        saveMunicipalityToStorage();
+        applyMunicipalityConfig();
+        closeMunicipalityModal();
+      }
+    }
+
+    function openMunicipalityModal() {
+      document.getElementById('modal-current-muni').textContent = `${activeMunicipality.fullTitle}（拠点: ${activeMunicipality.userAddress}）`;
+      const statsEl = document.getElementById('modal-db-stats');
+      if (statsEl) {
+        statsEl.textContent = `登録済: ${getRegisteredMunicipalityCount()}自治体`;
+      }
+      initPrefectureSelector(activeMunicipality.prefecture || "三重県", activeMunicipality.municipality || "四日市市");
+      document.getElementById('muni-error').classList.add('hidden');
+      document.getElementById('municipality-modal').classList.remove('hidden');
+    }
+
+    function closeMunicipalityModal() {
+      document.getElementById('municipality-modal').classList.add('hidden');
+    }
+
+    function fillAddressSample(val) {
+      document.getElementById('address-input').value = val;
+    }
+
+    function resetToYokkaichi() {
+      activeMunicipality = JSON.parse(JSON.stringify(DEFAULT_YOKKAICHI_CONFIG));
+      saveMunicipalityToStorage();
+      applyMunicipalityConfig();
+      closeMunicipalityModal();
+    }
+
+    function detectAddressFromGPS() {
+      const errEl = document.getElementById('muni-error');
+      errEl.classList.add('hidden');
+      if (!navigator.geolocation) {
+        errEl.textContent = "お使いのブラウザは位置情報（GPS）に対応していません。住所を直接入力してください。";
+        errEl.classList.remove('hidden');
+        return;
+      }
+      const inputEl = document.getElementById('address-input');
+      inputEl.value = "現在地を取得中...";
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          try {
+            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}&accept-language=ja`);
+            const data = await res.json();
+            const addr = data.address || {};
+            const pref = addr.province || addr.state || "";
+            const city = addr.city || addr.ward || addr.town || addr.village || "";
+            const suburb = addr.suburb || addr.neighbourhood || "";
+            const composed = `${pref}${city}${suburb}`.trim();
+            inputEl.value = composed || `${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
+          } catch (e) {
+            inputEl.value = `${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
+          }
+        },
+        () => {
+          inputEl.value = "";
+          errEl.textContent = "位置情報の取得が許可されませんでした。住所や市区町村名を手入力してください。";
+          errEl.classList.remove('hidden');
+        },
+        { enableHighAccuracy: true, timeout: 7000 }
+      );
+    }
+
+    async function registerMunicipalityByAddress() {
+      const addressRaw = document.getElementById('address-input').value.trim();
+      const errEl = document.getElementById('muni-error');
+      const loadingEl = document.getElementById('muni-loading');
+      const saveBtn = document.getElementById('save-muni-btn');
+      errEl.classList.add('hidden');
+
+      if (!addressRaw) {
+        errEl.textContent = "住所または市区町村名を入力してください。";
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      // まず全国マスターDBに登録済みデータがあるかチェック！
+      const matchedInDb = findMunicipalityInNationalDB(addressRaw);
+      if (matchedInDb && addressRaw.length <= 12) {
+        activeMunicipality = matchedInDb;
+        saveMunicipalityToStorage();
+        applyMunicipalityConfig();
+        closeMunicipalityModal();
+        return;
+      }
+
+      loadingEl.classList.remove('hidden');
+      saveBtn.disabled = true;
+
+      const prompt = `
+ユーザーが入力した住所・地域「${addressRaw}」に該当する日本の市区町村を特定し、その自治体の公式な「家庭ごみの分別区分・重要ルール・代表的な品目一覧・直接持ち込み処理施設や回収拠点（クリーンセンター・清掃工場・区役所環境窓口・小型家電回収拠点など）の正確な緯度経度」を調査してJSON形式で出力してください。
+      `;
+
+      const payload = {
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        tools: [{ "google_search": {} }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              prefecture: { type: "STRING" },
+              municipality: { type: "STRING" },
+              shortName: { type: "STRING" },
+              userAddress: { type: "STRING" },
+              centerLat: { type: "NUMBER" },
+              centerLng: { type: "NUMBER" },
+              categories: { type: "ARRAY", items: { type: "STRING" } },
+              aiPromptRules: { type: "STRING" },
+              rulesSummary: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    title: { type: "STRING" },
+                    color: { type: "STRING" },
+                    icon: { type: "STRING" },
+                    text: { type: "STRING" }
+                  },
+                  required: ["title", "color", "icon", "text"]
+                }
+              },
+              facilities: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    id: { type: "STRING" },
+                    type: { type: "STRING" },
+                    typeLabel: { type: "STRING" },
+                    name: { type: "STRING" },
+                    address: { type: "STRING" },
+                    lat: { type: "NUMBER" },
+                    lng: { type: "NUMBER" },
+                    hours: { type: "STRING" },
+                    phone: { type: "STRING" },
+                    targets: { type: "STRING" },
+                    note: { type: "STRING" },
+                    color: { type: "STRING" }
+                  },
+                  required: ["id", "type", "typeLabel", "name", "address", "lat", "lng", "hours", "phone", "targets", "note", "color"]
+                }
+              },
+              sampleItems: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    kana: { type: "STRING" },
+                    name: { type: "STRING" },
+                    cat: { type: "STRING" },
+                    note: { type: "STRING" },
+                    facilityId: { type: "STRING" }
+                  },
+                  required: ["kana", "name", "cat", "note"]
+                }
+              }
+            },
+            required: ["prefecture", "municipality", "shortName", "userAddress", "centerLat", "centerLng", "categories", "aiPromptRules", "rulesSummary", "facilities", "sampleItems"]
+          }
+        }
+      };
+
+      // Cloudflare Workers の /api/gemini エンドポイント経由で安全に呼び出し
+      const apiUrl = "/api/gemini";
+
+      let attempt = 0;
+      const maxRetries = 2;
+      const delays = [1000, 2000];
+
+      while (attempt <= maxRetries) {
+        try {
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          if (!response.ok) {
+            if (response.status === 403 || response.status === 400 || response.status === 401) {
+              throw new Error("API_AUTH_FALLBACK");
+            }
+            throw new Error(`API HTTP ${response.status}`);
+          }
+
+          const data = await response.json();
+          const candidateText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!candidateText) throw new Error("EMPTY_RESPONSE");
+
+          const parsed = JSON.parse(candidateText);
+          activeMunicipality = {
+            id: "custom_" + Date.now(),
+            prefecture: parsed.prefecture || "",
+            municipality: parsed.municipality || addressRaw,
+            fullTitle: `${parsed.prefecture || ""}${parsed.municipality || addressRaw}`,
+            shortName: parsed.shortName || parsed.municipality || addressRaw,
+            userAddress: parsed.userAddress || addressRaw,
+            centerLat: parsed.centerLat || 35.6812,
+            centerLng: parsed.centerLng || 139.7671,
+            isOfficialData: false,
+            categories: parsed.categories || DEFAULT_YOKKAICHI_CONFIG.categories,
+            rulesSummary: parsed.rulesSummary || DEFAULT_YOKKAICHI_CONFIG.rulesSummary,
+            aiPromptRules: parsed.aiPromptRules || "",
+            facilities: parsed.facilities || [],
+            items: parsed.sampleItems || []
+          };
+
+          loadingEl.classList.add('hidden');
+          saveBtn.disabled = false;
+          saveMunicipalityToStorage();
+          applyMunicipalityConfig();
+          closeMunicipalityModal();
+          return;
+        } catch (err) {
+          if (err.message === "API_AUTH_FALLBACK" || attempt === maxRetries) {
+            await registerMunicipalityLocallyFallback(addressRaw, loadingEl, saveBtn);
+            return;
+          }
+          await new Promise(res => setTimeout(res, delays[attempt]));
+          attempt++;
+        }
+      }
+    }
+
+    async function registerMunicipalityLocallyFallback(addressRaw, loadingEl, saveBtn) {
+      try {
+        const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addressRaw)}&addressdetails=1&accept-language=ja&limit=1`);
+        const geoList = await geoRes.json();
+        let lat = 34.9675, lng = 136.6185, pref = "", muni = addressRaw;
+
+        if (geoList && geoList.length > 0) {
+          lat = parseFloat(geoList[0].lat);
+          lng = parseFloat(geoList[0].lon);
+          const addr = geoList[0].address || {};
+          pref = addr.province || addr.state || "";
+          muni = addr.city || addr.ward || addr.town || addr.village || addressRaw;
+        }
+
+        const matchedInDb = findMunicipalityInNationalDB(muni) || findMunicipalityInNationalDB(addressRaw);
+        if (matchedInDb) {
+          activeMunicipality = matchedInDb;
+          activeMunicipality.userAddress = addressRaw;
+          activeMunicipality.centerLat = lat;
+          activeMunicipality.centerLng = lng;
+        } else {
+          activeMunicipality = {
+            id: "local_" + Date.now(),
+            prefecture: pref,
+            municipality: muni,
+            fullTitle: `${pref}${muni}`,
+            shortName: muni,
+            userAddress: addressRaw,
+            centerLat: lat,
+            centerLng: lng,
+            isOfficialData: false,
+            categories: ["可燃ごみ", "不燃ごみ", "資源物(紙・布)", "資源物(びん・缶・ペットボトル)", "小型家電", "粗大ごみ"],
+            rulesSummary: [
+              { title: "基本の分別ルール", color: "emerald", icon: "fa-recycle", text: `${pref}${muni}の一般家庭ごみ区分に基づき判定します。汚れを落とし、資源物は種類ごとに分けて出してください。` },
+              { title: "粗大ごみ・大型ごみ規定", color: "amber", icon: "fa-ruler", text: "一辺が30cm〜50cmを超える大型家具・寝具・家電などは自治体の粗大ごみ受付またはクリーンセンターへの持ち込みが必要です。" },
+              { title: "危険物・電池類の注意", color: "red", icon: "fa-triangle-exclamation", text: "刃物・割れ物は厚紙等で包んで「キケン」と表示し、乾電池・リチウムイオン電池・スプレー缶は発火防止のため必ず分けて出してください。" }
+            ],
+            aiPromptRules: `${pref}${muni}の標準的な家庭ごみ分別基準に従って判定してください。`,
+            facilities: [
+              {
+                id: "muni_office",
+                type: "office",
+                typeLabel: "自治体環境窓口・役所",
+                name: `${muni} 役所・環境担当窓口`,
+                address: `${pref}${muni}`,
+                lat: lat,
+                lng: lng,
+                hours: "月曜〜金曜 8:30〜17:15（土日祝除く）",
+                phone: "代表窓口へお問い合わせ",
+                targets: "粗大ごみ受付、特殊ごみ・持ち込み相談",
+                note: "詳細な持ち込み先や受付番号は各自治体の環境課へご確認ください。",
+                color: "#7c3aed"
+              },
+              {
+                id: "muni_center",
+                type: "center",
+                typeLabel: "清掃工場・クリーンセンター（周辺エリア）",
+                name: `${muni} 清掃工場・環境センター`,
+                address: `${pref}${muni}周辺`,
+                lat: lat + 0.015,
+                lng: lng + 0.015,
+                hours: "平日 8:30〜16:30（要事前確認）",
+                phone: "自治体ホームページ参照",
+                targets: "自己搬入ごみ、引っ越しごみ、大型粗大ごみ",
+                note: "Googleマップでルート案内を開くと最寄りのクリーンセンターへナビゲートできます。",
+                color: "#059669"
+              }
+            ],
+            items: DEFAULT_YOKKAICHI_CONFIG.items.map(item => ({
+              ...item,
+              facilityId: item.facilityId ? "muni_center" : ""
+            }))
+          };
+        }
+
+        loadingEl.classList.add('hidden');
+        saveBtn.disabled = false;
+        saveMunicipalityToStorage();
+        applyMunicipalityConfig();
+        closeMunicipalityModal();
+      } catch (e) {
+        loadingEl.classList.add('hidden');
+        saveBtn.disabled = false;
+        const errEl = document.getElementById('muni-error');
+        errEl.textContent = "住所の検索に失敗しました。市区町村名（例：桑名市、名古屋市、新宿区）で再度お試しください。";
+        errEl.classList.remove('hidden');
+      }
+    }
+
+    function saveMunicipalityToStorage() {
+      try {
+        localStorage.setItem('gomi_navi_municipality_v2', JSON.stringify(activeMunicipality));
+      } catch (e) {}
+    }
+
+    function loadMunicipalityFromStorage() {
+      try {
+        const saved = localStorage.getItem('gomi_navi_municipality_v2');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed && parsed.municipality) {
+            activeMunicipality = parsed;
+          }
+        }
+      } catch (e) {
+        activeMunicipality = JSON.parse(JSON.stringify(DEFAULT_YOKKAICHI_CONFIG));
+      }
+    }
+
+    function applyMunicipalityConfig() {
+      const badgeEl = document.getElementById('header-muni-badge');
+      const titleEl = document.getElementById('header-app-title');
+      const subtextEl = document.getElementById('camera-guide-subtext');
+      const mapBadgeEl = document.getElementById('map-muni-badge');
+
+      if (badgeEl) {
+        badgeEl.textContent = activeMunicipality.isOfficialData
+          ? `${activeMunicipality.fullTitle} 公式分別データ準拠`
+          : `${activeMunicipality.fullTitle} ルール適用中`;
+      }
+      if (titleEl) {
+        titleEl.textContent = `${activeMunicipality.shortName} AIごみ分別ナビ`;
+      }
+      if (subtextEl) {
+        subtextEl.textContent = `${activeMunicipality.municipality}の分別ルールをもとにAIが自動判定します`;
+      }
+      if (mapBadgeEl) {
+        mapBadgeEl.textContent = `${activeMunicipality.fullTitle}内`;
+      }
+
+      // 検索タブのカテゴリフィルターボタンを自治体の区分に合わせて再構築
+      currentDictCategory = "ALL";
+      renderCategoryFilterButtons();
+
+      // マップ出発地・施設リスト更新
+      selectedFacilityId = (activeMunicipality.facilities?.[0]?.id) || "";
+      currentOriginCoords = {
+        lat: activeMunicipality.centerLat,
+        lng: activeMunicipality.centerLng,
+        label: `登録住所（${activeMunicipality.userAddress}）`
+      };
+
+      const originSelect = document.getElementById('map-origin-select');
+      if (originSelect) {
+        originSelect.innerHTML = `
+          <option value="registered">登録住所（${escapeHtml(activeMunicipality.userAddress)}）</option>
+          <option value="gps">現在地（GPS）</option>
+          <option value="custom">地図上で選択した地点</option>
+        `;
+      }
+
+      if (googleMap && window.google && window.google.maps) {
+        googleMap.setCenter({ lat: activeMunicipality.centerLat, lng: activeMunicipality.centerLng });
+        googleMap.setZoom(12);
+        renderFacilityMarkers();
+        updateOriginAndRoute(false);
+      } else if (leafletMap) {
+        leafletMap.setView([activeMunicipality.centerLat, activeMunicipality.centerLng], 12);
+        renderFacilityMarkers();
+        updateOriginAndRoute(false);
+      }
+
+      initMapControls();
+      filterDictionary();
+    }
+
+    // =========================================================================
+    // 5. カメラ制御・画像読み込みロジック
+    // =========================================================================
+    async function startCamera() {
+      hideError();
+      try {
+        if (videoStream) {
+          videoStream.getTracks().forEach(t => t.stop());
+        }
+        videoStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: currentFacingMode },
+          audio: false
+        });
+        const videoEl = document.getElementById('camera-video');
+        videoEl.srcObject = videoStream;
+        videoEl.classList.remove('hidden');
+        document.getElementById('placeholder-state').classList.add('hidden');
+        document.getElementById('captured-image').classList.add('hidden');
+        document.getElementById('scan-overlay').classList.remove('hidden');
+        document.getElementById('switch-camera-btn').classList.remove('hidden');
+        document.getElementById('default-controls').classList.add('hidden');
+        document.getElementById('camera-active-controls').classList.remove('hidden');
+      } catch (err) {
+        showError("カメラの起動に失敗しました。ブラウザのカメラ許可を確認するか、「写真を選ぶ」から画像を選択してください。");
+      }
+    }
+
+    function stopCamera() {
+      if (videoStream) {
+        videoStream.getTracks().forEach(t => t.stop());
+        videoStream = null;
+      }
+      const videoEl = document.getElementById('camera-video');
+      if (videoEl) videoEl.classList.add('hidden');
+      const scanEl = document.getElementById('scan-overlay');
+      if (scanEl) scanEl.classList.add('hidden');
+      const switchBtn = document.getElementById('switch-camera-btn');
+      if (switchBtn) switchBtn.classList.add('hidden');
+      const activeCtrl = document.getElementById('camera-active-controls');
+      if (activeCtrl) activeCtrl.classList.add('hidden');
+      const defaultCtrl = document.getElementById('default-controls');
+      if (defaultCtrl) defaultCtrl.classList.remove('hidden');
+
+      if (!currentImageBase64) {
+        const ph = document.getElementById('placeholder-state');
+        if (ph) ph.classList.remove('hidden');
+      }
+    }
+
+    function toggleCameraFacing() {
+      currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+      startCamera();
+    }
+
+    function captureAndAnalyze() {
+      const videoEl = document.getElementById('camera-video');
+      const canvas = document.getElementById('capture-canvas');
+      if (!videoEl || !videoEl.videoWidth) return;
+
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      currentImageBase64 = dataUrl.split(',')[1];
+      currentImageMimeType = 'image/jpeg';
+
+      const imgEl = document.getElementById('captured-image');
+      imgEl.src = dataUrl;
+      imgEl.classList.remove('hidden');
+      document.getElementById('placeholder-state').classList.add('hidden');
+      document.getElementById('reanalyze-btn').classList.remove('hidden');
+
+      stopCamera();
+      analyzeImageWithGemini();
+    }
+
+    function handleImageUpload(event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      hideError();
+      stopCamera();
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const dataUrl = e.target.result;
+        currentImageBase64 = dataUrl.split(',')[1];
+        currentImageMimeType = file.type || 'image/jpeg';
+
+        const imgEl = document.getElementById('captured-image');
+        imgEl.src = dataUrl;
+        imgEl.classList.remove('hidden');
+        document.getElementById('placeholder-state').classList.add('hidden');
+        document.getElementById('reanalyze-btn').classList.remove('hidden');
+
+        analyzeImageWithGemini();
+      };
+      reader.readAsDataURL(file);
+      event.target.value = '';
+    }
+
+    function reanalyzeCurrentImage() {
+      if (!currentImageBase64) {
+        showError("先にカメラで撮影するか、写真を選択してください。");
+        return;
+      }
+      analyzeImageWithGemini();
+    }
+
+    // =========================================================================
+    // 6. AI画像認識＆分別判定ロジック（Gemini API + MobileNetフォールバック）
+    // =========================================================================
+    async function analyzeImageWithGemini() {
+      if (!currentImageBase64) return;
+      hideError();
+
+      const loadingEl = document.getElementById('loading-overlay');
+      const loadingTextEl = document.getElementById('loading-main-text');
+      loadingTextEl.textContent = `${activeMunicipality.municipality}の分別ルールを照合中...`;
+      loadingEl.classList.remove('hidden');
+
+      const extraContext = document.getElementById('extra-context-input').value.trim();
+      const facilitiesListText = (activeMunicipality.facilities || [])
+        .map(f => `- id: "${f.id}", 名称: "${f.name}", 対象: "${f.targets}"`)
+        .join('\n');
+
+      const prompt = `
+あなたは「${activeMunicipality.fullTitle}」の公式ごみ分別アドバイザーです。
+画像に写っている物体（ごみ）を特定し、${activeMunicipality.municipality}の公式ルールに従って最適な分別区分・出し方の手順・注意点をJSONで出力してください。
+
+【登録自治体の分別区分一覧】
+${(activeMunicipality.categories || []).join('、')}
+
+【自治体の重要分別ルール】
+${activeMunicipality.aiPromptRules || ''}
+
+【持ち込み・回収施設のIDリスト（該当する場合のみ facilityId に設定）】
+${facilitiesListText}
+
+${extraContext ? `【ユーザーからの補足情報】: ${extraContext}` : ''}
+
+※大きさ（50cm以下/超、1m以下/超）や素材（プラスチック製/金属製/ガラス製など）によって分別区分が変わる場合は、branches に選択肢（最大3つ）を入れてください。
+      `;
+
+      const payload = {
+        contents: [{
+          role: "user",
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType: currentImageMimeType, data: currentImageBase64 } }
+          ]
+        }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              itemName: { type: "STRING" },
+              confidenceReason: { type: "STRING" },
+              category: { type: "STRING" },
+              warningBadge: { type: "STRING" },
+              instructions: { type: "ARRAY", items: { type: "STRING" } },
+              facilityId: { type: "STRING" },
+              branches: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    label: { type: "STRING" },
+                    category: { type: "STRING" },
+                    instructions: { type: "ARRAY", items: { type: "STRING" } },
+                    facilityId: { type: "STRING" }
+                  },
+                  required: ["label", "category", "instructions"]
+                }
+              }
+            },
+            required: ["itemName", "confidenceReason", "category", "instructions"]
+          }
+        }
+      };
+
+      // Cloudflare Workers の /api/gemini エンドポイント経由で安全に呼び出し
+      const apiUrl = "/api/gemini";
+
+      try {
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP_${response.status}`);
+        }
+
+        const data = await response.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error("EMPTY_RESPONSE");
+
+        const result = JSON.parse(text);
+        currentAIResult = result;
+        loadingEl.classList.add('hidden');
+        renderAIResult(result);
+        saveToHistory(result);
+      } catch (err) {
+        await analyzeImageLocallyFallback(loadingEl);
+      }
+    }
+
+    async function analyzeImageLocallyFallback(loadingEl) {
+      try {
+        const imgEl = document.getElementById('captured-image');
+        if (!localMobileNetModel && window.mobilenet) {
+          localMobileNetModel = await window.mobilenet.load();
+        }
+
+        let detectedKeyword = "プラスチック";
+        if (localMobileNetModel && imgEl) {
+          const predictions = await localMobileNetModel.classify(imgEl);
+          const topLabel = (predictions?.[0]?.className || "").toLowerCase();
+          if (topLabel.includes("bottle") || topLabel.includes("water")) detectedKeyword = "ペットボトル";
+          else if (topLabel.includes("can") || topLabel.includes("tin")) detectedKeyword = "缶";
+          else if (topLabel.includes("pan") || topLabel.includes("pot") || topLabel.includes("wok")) detectedKeyword = "フライパン";
+          else if (topLabel.includes("phone") || topLabel.includes("cellular")) detectedKeyword = "スマートフォン";
+          else if (topLabel.includes("laptop") || topLabel.includes("computer")) detectedKeyword = "パソコン";
+          else if (topLabel.includes("book") || topLabel.includes("magazine")) detectedKeyword = "新聞";
+          else if (topLabel.includes("shoe") || topLabel.includes("sneaker")) detectedKeyword = "スニーカー";
+          else if (topLabel.includes("umbrella")) detectedKeyword = "傘";
+          else if (topLabel.includes("chair")) detectedKeyword = "いす";
+          else if (topLabel.includes("cup") || topLabel.includes("mug")) detectedKeyword = "ガラス";
+        }
+
+        const matched = (activeMunicipality.items || []).find(i => i.name.includes(detectedKeyword)) || {
+          name: detectedKeyword,
+          cat: (activeMunicipality.categories?.[0]) || "可燃ごみ",
+          note: "汚れを軽く落とし、指定の出し方に従って出してください。詳しい条件は「品目一覧検索」タブからも確認できます。",
+          facilityId: ""
+        };
+
+        const fallbackResult = {
+          itemName: matched.name,
+          confidenceReason: `${activeMunicipality.municipality}の公式品目別一覧表データと照合して判定しました。`,
+          category: matched.cat,
+          warningBadge: (matched.note && (matched.note.includes("危険") || matched.note.includes("厳禁"))) ? "取り扱いに注意" : "",
+          instructions: matched.note ? [matched.note] : [`${activeMunicipality.municipality}の「${matched.cat}」の収集日に出してください。`],
+          facilityId: matched.facilityId || "",
+          branches: []
+        };
+
+        currentAIResult = fallbackResult;
+        loadingEl.classList.add('hidden');
+        renderAIResult(fallbackResult);
+        saveToHistory(fallbackResult);
+      } catch (e) {
+        loadingEl.classList.add('hidden');
+        showError("画像の解析に失敗しました。別の写真を選ぶか、「品目一覧検索」タブから品目名で検索してください。");
+      }
+    }
+
+    function renderAIResult(result, activeBranchIndex = -1) {
+      const container = document.getElementById('result-container');
+      let displayCat = result.category;
+      let displayInstructions = result.instructions || [];
+      let displayFacilityId = result.facilityId || "";
+
+      if (activeBranchIndex >= 0 && result.branches && result.branches[activeBranchIndex]) {
+        const branch = result.branches[activeBranchIndex];
+        displayCat = branch.category;
+        displayInstructions = branch.instructions || [];
+        displayFacilityId = branch.facilityId || displayFacilityId;
+      }
+
+      const style = getCategoryStyle(displayCat);
+      const targetFacility = (activeMunicipality.facilities || []).find(f => f.id === displayFacilityId);
+
+      const branchesHtml = (result.branches && result.branches.length > 0) ? `
+        <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2">
+          <p class="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+            <i class="fa-solid fa-code-branch"></i> 大きさ・素材によって区分が変わります（タップして切替）：
+          </p>
+          <div class="flex flex-wrap gap-1.5">
+            <button onclick="renderAIResult(currentAIResult, -1)" class="px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeBranchIndex === -1 ? 'bg-amber-600 text-white shadow-sm' : 'bg-white text-amber-900 border border-amber-300 hover:bg-amber-100'}">
+              標準判定
+            </button>
+            ${result.branches.map((b, idx) => `
+              <button onclick="renderAIResult(currentAIResult, ${idx})" class="px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeBranchIndex === idx ? 'bg-amber-600 text-white shadow-sm' : 'bg-white text-amber-900 border border-amber-300 hover:bg-amber-100'}">
+                ${escapeHtml(b.label)}
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      ` : '';
+
+      const facilityButtonHtml = targetFacility ? `
+        <div class="pt-1">
+          <button onclick="openFacilityOnMap('${targetFacility.id}')" class="w-full bg-blue-600 hover:bg-blue-700 active:scale-[0.99] text-white font-black py-3 px-4 rounded-xl shadow-sm transition flex items-center justify-center gap-2 text-xs sm:text-sm">
+            <i class="fa-solid fa-map-location-dot"></i>
+            <span>「${escapeHtml(targetFacility.name)}」の場所とルートをマップで見る</span>
+          </button>
+        </div>
+      ` : '';
+
+      container.innerHTML = `
+        <div class="bg-white rounded-2xl shadow-md border-2 ${style.border} overflow-hidden">
+          <div class="${style.bg} text-white p-4 sm:p-5 flex items-center justify-between gap-3">
+            <div>
+              <span class="text-[11px] font-bold uppercase tracking-wider bg-black/25 px-2.5 py-0.5 rounded-full">
+                ${escapeHtml(activeMunicipality.municipality)} 分別判定結果
+              </span>
+              <h2 class="text-xl sm:text-2xl font-black mt-1.5 flex items-center gap-2">
+                <i class="fa-solid ${style.icon}"></i>
+                <span>${escapeHtml(displayCat)}</span>
+              </h2>
+            </div>
+            ${result.warningBadge ? `
+              <span class="shrink-0 bg-amber-300 text-slate-900 text-xs font-black px-3 py-1.5 rounded-xl shadow-sm flex items-center gap-1">
+                <i class="fa-solid fa-triangle-exclamation"></i>
+                ${escapeHtml(result.warningBadge)}
+              </span>
+            ` : ''}
+          </div>
+
+          <div class="p-4 sm:p-5 space-y-4">
+            <div class="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+              <div>
+                <p class="text-xs font-bold text-slate-400">認識された品目</p>
+                <p class="text-lg font-black text-slate-900">${escapeHtml(result.itemName)}</p>
+                <p class="text-xs text-slate-600 mt-0.5">${escapeHtml(result.confidenceReason || '')}</p>
+              </div>
+            </div>
+
+            ${branchesHtml}
+
+            <div class="space-y-2">
+              <p class="text-xs font-black text-slate-700 flex items-center gap-1.5">
+                <i class="fa-solid fa-list-check text-emerald-600"></i> 出し方・注意点
+              </p>
+              <ul class="space-y-1.5">
+                ${displayInstructions.map(inst => `
+                  <li class="text-xs sm:text-sm text-slate-700 bg-slate-50 p-2.5 rounded-xl border border-slate-200 flex items-start gap-2">
+                    <i class="fa-solid fa-circle-check text-emerald-600 mt-0.5 shrink-0"></i>
+                    <span>${escapeHtml(inst)}</span>
+                  </li>
+                `).join('')}
+              </ul>
+            </div>
+
+            ${facilityButtonHtml}
+          </div>
+        </div>
+      `;
+      container.classList.remove('hidden');
+    }
+
+    // =========================================================================
+    // 7. 品目一覧検索・辞書UIロジック
+    // =========================================================================
+    function renderCategoryFilterButtons() {
+      const catContainer = document.getElementById('category-filters');
+      if (!catContainer) return;
+
+      const cats = activeMunicipality.categories || [];
+      const allBtn = `<button onclick="setCategoryFilter('ALL')" data-cat="ALL" class="cat-filter-btn shrink-0 px-3 py-1.5 rounded-full bg-emerald-600 text-white transition">すべて</button>`;
+      const catBtns = cats.map(c => `
+        <button onclick="setCategoryFilter('${escapeHtml(c)}')" data-cat="${escapeHtml(c)}" class="cat-filter-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition">
+          ${escapeHtml(c)}
+        </button>
+      `).join('');
+
+      catContainer.innerHTML = allBtn + catBtns;
+    }
+
+    function initDictionaryUI() {
+      renderCategoryFilterButtons();
+      const kanaList = ['ALL', 'あ', 'か', 'さ', 'た', 'な', 'は', 'ま', 'や', 'ら', 'わ'];
+      const kanaContainer = document.getElementById('kana-filters');
+      if (kanaContainer) {
+        kanaContainer.innerHTML = kanaList.map(k => `
+          <button onclick="setKanaFilter('${k}')" data-kana="${k}" class="kana-filter-btn px-2.5 py-1 rounded-lg transition ${k === 'ALL' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}">
+            ${k === 'ALL' ? '全行' : k + '行'}
+          </button>
+        `).join('');
+      }
+      filterDictionary();
+    }
+
+    function setCategoryFilter(cat) {
+      currentDictCategory = cat;
+      document.querySelectorAll('.cat-filter-btn').forEach(btn => {
+        if (btn.getAttribute('data-cat') === cat) {
+          btn.className = "cat-filter-btn shrink-0 px-3 py-1.5 rounded-full bg-emerald-600 text-white transition";
+        } else {
+          btn.className = "cat-filter-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition";
+        }
+      });
+      filterDictionary();
+    }
+
+    function setKanaFilter(kana) {
+      currentDictKana = kana;
+      document.querySelectorAll('.kana-filter-btn').forEach(btn => {
+        if (btn.getAttribute('data-kana') === kana) {
+          btn.className = "kana-filter-btn px-2.5 py-1 rounded-lg bg-slate-800 text-white transition";
+        } else {
+          btn.className = "kana-filter-btn px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 transition";
+        }
+      });
+      filterDictionary();
+    }
+
+    function clearSearch() {
+      const input = document.getElementById('dict-search-input');
+      if (input) input.value = '';
+      filterDictionary();
+    }
+
+    function filterDictionary() {
+      const input = document.getElementById('dict-search-input');
+      const query = (input ? input.value : '').trim().toLowerCase();
+      const clearBtn = document.getElementById('clear-search-btn');
+      if (clearBtn) {
+        clearBtn.classList.toggle('hidden', query.length === 0);
+      }
+
+      const items = activeMunicipality.items || [];
+      const filtered = items.filter(item => {
+        const matchQuery = !query ||
+          item.name.toLowerCase().includes(query) ||
+          item.cat.toLowerCase().includes(query) ||
+          (item.note && item.note.toLowerCase().includes(query));
+
+        let matchCat = true;
+        if (currentDictCategory !== 'ALL') {
+          matchCat = item.cat === currentDictCategory || item.cat.includes(currentDictCategory);
+        }
+
+        const matchKana = currentDictKana === 'ALL' || item.kana === currentDictKana;
+        return matchQuery && matchCat && matchKana;
+      });
+
+      const countLabel = document.getElementById('dict-count-label');
+      if (countLabel) {
+        countLabel.textContent = `${activeMunicipality.municipality}品目一覧：${filtered.length}件表示（全${items.length}件）`;
+      }
+
+      const listEl = document.getElementById('dict-results-list');
+      if (!listEl) return;
+
+      if (filtered.length === 0) {
+        listEl.innerHTML = `
+          <div class="bg-white rounded-2xl p-8 text-center border border-slate-200 text-slate-500">
+            <i class="fa-solid fa-magnifying-glass text-3xl text-slate-300 mb-2"></i>
+            <p class="font-bold text-slate-700">該当する品目が見つかりませんでした</p>
+            <p class="text-xs mt-1">別のキーワードに変えるか、フィルターを「すべて」に戻してください。</p>
+          </div>
+        `;
+        return;
+      }
+
+      listEl.innerHTML = filtered.map(item => {
+        const style = getCategoryStyle(item.cat);
+        const fac = item.facilityId ? (activeMunicipality.facilities || []).find(f => f.id === item.facilityId) : null;
+        return `
+          <div class="bg-white rounded-xl p-3.5 sm:p-4 shadow-sm border border-slate-200 space-y-2">
+            <div class="flex items-start justify-between gap-2">
+              <span class="font-black text-slate-900 text-sm sm:text-base">${escapeHtml(item.name)}</span>
+              <span class="shrink-0 inline-flex items-center gap-1 ${style.bg} text-white text-xs font-bold px-2.5 py-1 rounded-lg">
+                <i class="fa-solid ${style.icon}"></i>
+                ${escapeHtml(item.cat)}
+              </span>
+            </div>
+            ${item.note ? `
+              <p class="text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-100 leading-relaxed">
+                <i class="fa-solid fa-circle-info text-emerald-600 mr-1"></i>${escapeHtml(item.note)}
+              </p>
+            ` : ''}
+            ${fac ? `
+              <div class="pt-0.5">
+                <button onclick="openFacilityOnMap('${fac.id}')" class="text-xs font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1">
+                  <i class="fa-solid fa-location-dot"></i>
+                  <span>「${escapeHtml(fac.name)}」の場所・ルートを見る</span>
+                </button>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    // =========================================================================
+    // 8. 自治体 施設マップ＆ルート案内（Google Maps + Leafletフォールバック）
+    // =========================================================================
+    function initMapControls() {
+      const destSelect = document.getElementById('map-dest-select');
+      if (!destSelect) return;
+      destSelect.innerHTML = (activeMunicipality.facilities || []).map(f => `
+        <option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}（${escapeHtml(f.typeLabel)}）</option>
+      `).join('');
+    }
+
+    function openFacilityOnMap(facilityId) {
+      selectedFacilityId = facilityId;
+      switchTab('map');
+      setTimeout(() => {
+        selectFacilityById(facilityId, true);
+      }, 150);
+    }
+
+    function handleGoogleMapsFallback() {
+      useLeafletFallback = true;
+      googleMap = null;
+      const mapContainer = document.getElementById('yokkaichi-map');
+      if (mapContainer) {
+        mapContainer.innerHTML = '';
+      }
+      initLeafletMap();
+      renderFacilityMarkers();
+      selectFacilityById(selectedFacilityId, false);
+    }
+
+    function initOrUpdateMap() {
+      const hasGoogleMaps = !useLeafletFallback && !window.googleMapsAuthFailed && window.google && window.google.maps;
+      if (hasGoogleMaps) {
+        if (!googleMap) {
+          const mapEl = document.getElementById('yokkaichi-map');
+          googleMap = new google.maps.Map(mapEl, {
+            center: { lat: activeMunicipality.centerLat, lng: activeMunicipality.centerLng },
+            zoom: 12,
+            mapTypeControl: false,
+            streetViewControl: false,
+            fullscreenControl: true
+          });
+          googleInfoWindow = new google.maps.InfoWindow();
+
+          googleMap.addListener('click', (e) => {
+            currentOriginCoords = {
+              lat: e.latLng.lat(),
+              lng: e.latLng.lng(),
+              label: `指定地点 (${e.latLng.lat().toFixed(4)}, ${e.latLng.lng().toFixed(4)})`
+            };
+            document.getElementById('map-origin-select').value = 'custom';
+            updateOriginAndRoute(false);
+          });
+          renderFacilityMarkers();
+        }
+        setTimeout(() => {
+          google.maps.event.trigger(googleMap, 'resize');
+          selectFacilityById(selectedFacilityId, false);
+        }, 100);
+      } else {
+        initLeafletMap();
+      }
+    }
+
+    function initLeafletMap() {
+      if (!leafletMap) {
+        leafletMap = L.map('yokkaichi-map').setView([activeMunicipality.centerLat, activeMunicipality.centerLng], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors',
+          maxZoom: 19
+        }).addTo(leafletMap);
+
+        leafletMap.on('click', function(e) {
+          currentOriginCoords = {
+            lat: e.latlng.lat,
+            lng: e.latlng.lng,
+            label: `指定地点 (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`
+          };
+          document.getElementById('map-origin-select').value = 'custom';
+          updateOriginAndRoute(false);
+        });
+      }
+      renderFacilityMarkers();
+      setTimeout(() => {
+        leafletMap.invalidateSize();
+        selectFacilityById(selectedFacilityId, false);
+      }, 100);
+    }
+
+    function renderFacilityMarkers() {
+      if (googleMap && window.google && window.google.maps) {
+        Object.values(googleFacilityMarkers).forEach(m => m.setMap(null));
+        googleFacilityMarkers = {};
+        (activeMunicipality.facilities || []).forEach(fac => {
+          if (currentMapFacilityFilter !== 'ALL' && fac.type !== currentMapFacilityFilter) return;
+          const marker = new google.maps.Marker({
+            position: { lat: fac.lat, lng: fac.lng },
+            map: googleMap,
+            title: fac.name,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 11,
+              fillColor: fac.color || "#059669",
+              fillOpacity: 1,
+              strokeColor: "#ffffff",
+              strokeWeight: 2.5
+            }
+          });
+          marker.addListener('click', () => selectFacilityById(fac.id, false));
+          googleFacilityMarkers[fac.id] = marker;
+        });
+        return;
+      }
+
+      if (!leafletMap) return;
+      Object.values(facilityMarkers).forEach(m => leafletMap.removeLayer(m));
+      facilityMarkers = {};
+      (activeMunicipality.facilities || []).forEach(fac => {
+        if (currentMapFacilityFilter !== 'ALL' && fac.type !== currentMapFacilityFilter) return;
+        const iconHtml = `
+          <div style="background-color: ${fac.color};" class="w-8 h-8 rounded-full border-2 border-white shadow-md flex items-center justify-center text-white text-xs">
+            <i class="fa-solid ${fac.type === 'center' ? 'fa-industry' : fac.type === 'office' ? 'fa-building-columns' : 'fa-box-archive'}"></i>
+          </div>
+        `;
+        const customIcon = L.divIcon({
+          html: iconHtml,
+          className: 'custom-div-icon',
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        });
+        const marker = L.marker([fac.lat, fac.lng], { icon: customIcon }).addTo(leafletMap);
+        marker.bindPopup(`
+          <div class="text-xs font-sans space-y-1 min-w-[180px]">
+            <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style="background:${fac.color}">${escapeHtml(fac.typeLabel)}</span>
+            <p class="font-bold text-slate-900 text-sm">${escapeHtml(fac.name)}</p>
+            <p class="text-slate-600">${escapeHtml(fac.address)}</p>
+          </div>
+        `);
+        marker.on('click', () => selectFacilityById(fac.id, false));
+        facilityMarkers[fac.id] = marker;
+      });
+    }
+
+    function filterMapFacilities(type) {
+      currentMapFacilityFilter = type;
+      document.querySelectorAll('.map-cat-btn').forEach(btn => {
+        if (btn.getAttribute('data-fcat') === type) {
+          btn.className = "map-cat-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-800 text-white transition";
+        } else {
+          btn.className = "map-cat-btn shrink-0 px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 transition";
+        }
+      });
+      renderFacilityMarkers();
+    }
+
+    function handleOriginChange() {
+      const val = document.getElementById('map-origin-select').value;
+      if (val === 'registered') {
+        currentOriginCoords = {
+          lat: activeMunicipality.centerLat,
+          lng: activeMunicipality.centerLng,
+          label: `登録住所（${activeMunicipality.userAddress}）`
+        };
+        updateOriginAndRoute(true);
+      } else if (val === 'gps') {
+        useCurrentLocation();
+      }
+    }
+
+    function useCurrentLocation() {
+      if (!navigator.geolocation) {
+        showError("お使いのブラウザは現在地（GPS）の取得に対応していません。");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          currentOriginCoords = {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            label: "現在地（GPS）"
+          };
+          const originSelect = document.getElementById('map-origin-select');
+          if (originSelect) originSelect.value = 'gps';
+          updateOriginAndRoute(true);
+        },
+        () => {
+          showError("現在地の取得が許可されませんでした。ブラウザの位置情報設定をご確認ください。");
+        },
+        { enableHighAccuracy: true, timeout: 7000 }
+      );
+    }
+
+    function selectFacilityById(facId, shouldZoom = false) {
+      const facilities = activeMunicipality.facilities || [];
+      if (facilities.length === 0) return;
+      const fac = facilities.find(f => f.id === facId) || facilities[0];
+      selectedFacilityId = fac.id;
+      const destSelect = document.getElementById('map-dest-select');
+      if (destSelect && destSelect.value !== fac.id) {
+        destSelect.value = fac.id;
+      }
+      updateOriginAndRoute(shouldZoom);
+    }
+
+    function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    async function fetchRealRoadRoute(origin, dest) {
+      try {
+        // Cloudflare Workers の /api/routes エンドポイント経由で経路検索
+        const res = await fetch('/api/routes', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            origin: { lat: origin.lat, lng: origin.lng },
+            destination: { lat: dest.lat, lng: dest.lng }
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const route = data.routes?.[0];
+          if (route && route.polyline?.encodedPolyline) {
+            const path = decodeGooglePolyline(route.polyline.encodedPolyline);
+            const km = (route.distanceMeters / 1000).toFixed(1);
+            const secs = parseInt(String(route.duration || '0').replace('s', ''), 10) || 0;
+            const mins = Math.max(1, Math.round(secs / 60));
+            return { path, distanceText: `約 ${km} km`, durationText: `車で約${mins}分` };
+          }
+        }
+      } catch (e) {}
+
+      try {
+        const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${origin.lng},${origin.lat};${dest.lng},${dest.lat}?overview=full&geometries=geojson`;
+        const osrmRes = await fetch(osrmUrl);
+        if (osrmRes.ok) {
+          const osrmData = await osrmRes.json();
+          const route = osrmData.routes?.[0];
+          if (route && route.geometry?.coordinates) {
+            const path = route.geometry.coordinates.map(c => ({ lat: c[1], lng: c[0] }));
+            const km = (route.distance / 1000).toFixed(1);
+            const mins = Math.max(1, Math.round(route.duration / 60));
+            return { path, distanceText: `約 ${km} km`, durationText: `車で約${mins}分` };
+          }
+        }
+      } catch (e) {}
+
+      return null;
+    }
+
+    function decodeGooglePolyline(encoded) {
+      const points = [];
+      let index = 0, len = encoded.length;
+      let lat = 0, lng = 0;
+      while (index < len) {
+        let b, shift = 0, result = 0;
+        do {
+          b = encoded.charCodeAt(index++) - 63;
+          result |= (b & 0x1f) << shift;
+          shift += 5;
+        } while (b >= 0x20);
+        const dlat = ((result & 1) ? ~(result >> 1) : (result >> 1));
+        lat += dlat;
+
+        shift = 0;
+        result = 0;
+        do {
+          b = encoded.charCodeAt(index++) - 63;
+          result |= (b & 0x1f) << shift;
+          shift += 5;
+        } while (b >= 0x20);
+        const dlng = ((result & 1) ? ~(result >> 1) : (result >> 1));
+        lng += dlng;
+
+        points.push({ lat: lat / 1e5, lng: lng / 1e5 });
+      }
+      return points;
+    }
+
+    async function updateOriginAndRoute(shouldZoom = false) {
+      const facilities = activeMunicipality.facilities || [];
+      const fac = facilities.find(f => f.id === selectedFacilityId) || facilities[0];
+      if (!fac) return;
+
+      const directKm = calculateDistanceKm(currentOriginCoords.lat, currentOriginCoords.lng, fac.lat, fac.lng);
+      const fallbackRoadKm = (directKm * 1.25).toFixed(1);
+      const fallbackDriveMins = Math.max(3, Math.round((directKm * 1.25 / 28) * 60));
+
+      if (googleMap && window.google && window.google.maps) {
+        if (googleOriginMarker) googleOriginMarker.setMap(null);
+        googleOriginMarker = new google.maps.Marker({
+          position: { lat: currentOriginCoords.lat, lng: currentOriginCoords.lng },
+          map: googleMap,
+          title: `出発地：${currentOriginCoords.label}`,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 9,
+            fillColor: "#2563eb",
+            fillOpacity: 1,
+            strokeColor: "#ffffff",
+            strokeWeight: 2.5
+          }
+        });
+
+        const targetMarker = googleFacilityMarkers[fac.id];
+        if (targetMarker && googleInfoWindow) {
+          googleInfoWindow.setContent(`
+            <div style="font-family: 'Noto Sans JP', sans-serif; padding: 2px; max-width: 220px;">
+              <span style="display:inline-block; background:${fac.color}; color:#fff; font-size:10px; font-weight:700; padding:2px 6px; border-radius:999px; margin-bottom:2px;">${escapeHtml(fac.typeLabel)}</span>
+              <div style="font-weight:800; font-size:13px; color:#0f172a;">${escapeHtml(fac.name)}</div>
+              <div style="font-size:11px; color:#475569; margin-top:2px;">${escapeHtml(fac.address)}</div>
+            </div>
+          `);
+          googleInfoWindow.open(googleMap, targetMarker);
+        }
+
+        const routeData = await fetchRealRoadRoute(currentOriginCoords, { lat: fac.lat, lng: fac.lng });
+        const routePath = routeData
+          ? routeData.path
+          : [{ lat: currentOriginCoords.lat, lng: currentOriginCoords.lng }, { lat: fac.lat, lng: fac.lng }];
+        const distanceText = routeData ? routeData.distanceText : `約 ${fallbackRoadKm} km`;
+        const durationText = routeData ? routeData.durationText : `車で約${fallbackDriveMins}分`;
+
+        if (googleRoutePolyline) googleRoutePolyline.setMap(null);
+        googleRoutePolyline = new google.maps.Polyline({
+          path: routePath,
+          geodesic: true,
+          strokeColor: "#059669",
+          strokeOpacity: 0.9,
+          strokeWeight: 5,
+          map: googleMap
+        });
+
+        if (shouldZoom) {
+          const bounds = new google.maps.LatLngBounds();
+          routePath.forEach(pt => bounds.extend(pt));
+          googleMap.fitBounds(bounds);
+        }
+
+        renderSelectedFacilityCard(fac, distanceText, durationText);
+        return;
+      }
+
+      if (leafletMap) {
+        if (originMarker) leafletMap.removeLayer(originMarker);
+        const originIcon = L.divIcon({
+          html: `<div class="w-7 h-7 rounded-full bg-blue-600 border-2 border-white shadow-md flex items-center justify-center text-white text-xs"><i class="fa-solid fa-user"></i></div>`,
+          className: 'custom-div-icon',
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        });
+        originMarker = L.marker([currentOriginCoords.lat, currentOriginCoords.lng], { icon: originIcon })
+          .addTo(leafletMap)
+          .bindPopup(`<div class="text-xs font-bold">出発地：${escapeHtml(currentOriginCoords.label)}</div>`);
+
+        if (routePolyline) leafletMap.removeLayer(routePolyline);
+        routePolyline = L.polyline([
+          [currentOriginCoords.lat, currentOriginCoords.lng],
+          [fac.lat, fac.lng]
+        ], {
+          color: '#059669',
+          weight: 4,
+          opacity: 0.85,
+          dashArray: '8, 8'
+        }).addTo(leafletMap);
+
+        if (facilityMarkers[fac.id]) {
+          facilityMarkers[fac.id].openPopup();
+        }
+        if (shouldZoom) {
+          const bounds = L.latLngBounds([
+            [currentOriginCoords.lat, currentOriginCoords.lng],
+            [fac.lat, fac.lng]
+          ]);
+          leafletMap.fitBounds(bounds, { padding: [45, 45], maxZoom: 14 });
+        }
+      }
+
+      renderSelectedFacilityCard(fac, `約 ${fallbackRoadKm} km`, `車で約${fallbackDriveMins}分`);
+    }
+
+    function renderSelectedFacilityCard(fac, distanceText, durationText) {
+      const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${currentOriginCoords.lat},${currentOriginCoords.lng}&destination=${fac.lat},${fac.lng}&travelmode=driving`;
+      const cardEl = document.getElementById('selected-facility-card');
+      cardEl.innerHTML = `
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-200 pb-3">
+          <div>
+            <span class="inline-block text-[11px] font-black text-white px-2 py-0.5 rounded-full mb-1" style="background:${fac.color}">
+              ${escapeHtml(fac.typeLabel)}
+            </span>
+            <h3 class="text-base sm:text-lg font-black text-slate-900">${escapeHtml(fac.name)}</h3>
+            <p class="text-xs text-slate-600 mt-0.5 flex items-center gap-1">
+              <i class="fa-solid fa-location-dot text-rose-600"></i> ${escapeHtml(fac.address)}
+            </p>
+          </div>
+          <div class="bg-white px-3 py-2 rounded-xl border border-emerald-200 text-right shrink-0">
+            <p class="text-[10px] font-bold text-slate-500">${escapeHtml(currentOriginCoords.label)}からのルート</p>
+            <p class="text-sm sm:text-base font-black text-emerald-700">
+              ${escapeHtml(distanceText)} <span class="text-xs font-bold text-slate-600">（${escapeHtml(durationText)}）</span>
+            </p>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 gap-2 text-xs text-slate-700">
+          <div class="bg-white/80 p-2.5 rounded-xl border border-emerald-100">
+            <p class="font-bold text-slate-800"><i class="fa-regular fa-clock text-emerald-600 mr-1"></i>受付時間</p>
+            <p class="mt-0.5">${escapeHtml(fac.hours)}（TEL: ${escapeHtml(fac.phone)}）</p>
+          </div>
+          <div class="bg-white/80 p-2.5 rounded-xl border border-emerald-100">
+            <p class="font-bold text-slate-800"><i class="fa-solid fa-boxes-stacked text-emerald-600 mr-1"></i>主な対象品目・対応内容</p>
+            <p class="mt-0.5">${escapeHtml(fac.targets)}</p>
+          </div>
+          <p class="text-[11px] text-slate-600 px-1">※ ${escapeHtml(fac.note)}</p>
+        </div>
+
+        <div class="pt-1">
+          <a href="${googleMapsUrl}" target="_blank" rel="noopener noreferrer" class="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-black py-3 px-4 rounded-xl shadow-md transition flex items-center justify-center gap-2 text-sm">
+            <i class="fa-solid fa-diamond-turn-right text-base"></i>
+            <span>Googleマップアプリでナビを開始</span>
+          </a>
+        </div>
+      `;
+    }
+
+    // =========================================================================
+    // 9. 判定履歴管理（LocalStorage）
+    // =========================================================================
+    function loadHistory() {
+      try {
+        const saved = localStorage.getItem('yokkaichi_gomi_history');
+        if (saved) judgmentHistory = JSON.parse(saved);
+      } catch (e) {
+        judgmentHistory = [];
+      }
+    }
+
+    function saveToHistory(mainItem) {
+      if (!mainItem) return;
+      const entry = {
+        id: Date.now(),
+        date: new Date().toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+        municipality: activeMunicipality.municipality,
+        itemName: mainItem.itemName,
+        category: mainItem.category,
+        instructions: mainItem.instructions || [],
+        warningBadge: mainItem.warningBadge || ''
+      };
+      judgmentHistory.unshift(entry);
+      if (judgmentHistory.length > 20) judgmentHistory.pop();
+      try {
+        localStorage.setItem('yokkaichi_gomi_history', JSON.stringify(judgmentHistory));
+      } catch (e) {}
+    }
+
+    function clearHistory() {
+      judgmentHistory = [];
+      try {
+        localStorage.removeItem('yokkaichi_gomi_history');
+      } catch (e) {}
+      renderHistory();
+    }
+
+    function renderHistory() {
+      const listEl = document.getElementById('history-list');
+      if (judgmentHistory.length === 0) {
+        listEl.innerHTML = `
+          <div class="bg-white rounded-2xl p-8 text-center border border-slate-200 text-slate-500">
+            <i class="fa-solid fa-clock-rotate-left text-3xl text-slate-300 mb-2"></i>
+            <p class="font-bold text-slate-700">まだ判定履歴がありません</p>
+            <p class="text-xs mt-1">カメラまたは写真からごみを判定すると、ここに自動で記録されます。</p>
+          </div>
+        `;
+        return;
+      }
+
+      listEl.innerHTML = judgmentHistory.map(h => {
+        const style = getCategoryStyle(h.category);
+        return `
+          <div class="bg-white rounded-xl p-4 shadow-sm border border-slate-200 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-black text-slate-800 text-sm sm:text-base">${escapeHtml(h.itemName)}</span>
+                ${h.municipality ? `<span class="text-[10px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">${escapeHtml(h.municipality)}</span>` : ''}
+                <span class="text-[11px] text-slate-400">${escapeHtml(h.date)}</span>
+              </div>
+              <span class="inline-flex items-center gap-1 ${style.bg} text-white text-xs font-bold px-2.5 py-1 rounded-lg shrink-0">
+                <i class="fa-solid ${style.icon}"></i>
+                ${escapeHtml(h.category)}
+              </span>
+            </div>
+            ${h.instructions.length > 0 ? `
+              <p class="text-xs text-slate-600 bg-slate-50 p-2 rounded-lg">
+                ${escapeHtml(h.instructions.join(' / '))}
+              </p>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    // =========================================================================
+    // 10. ユーティリティ関数＆初期化
+    // =========================================================================
+    function showError(msg) {
+      const box = document.getElementById('error-box');
+      document.getElementById('error-message').textContent = msg;
+      box.classList.remove('hidden');
+    }
+
+    function hideError() {
+      document.getElementById('error-box').classList.add('hidden');
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    window.onload = function() {
+      loadMunicipalityFromStorage();
+      loadHistory();
+      initDictionaryUI();
+      applyMunicipalityConfig();
+    };
+  </script>
+</body>
+</html>
